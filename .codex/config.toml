@@ -1,7 +1,0 @@
-[mcp_servers.asc-mcp]
-command = "/Users/abezlyudniy/.config/codex/bin/asc-mcp-wrapper"
-args = ["climeter"]
-enabled = true
-default_tools_approval_mode = "approve"
-startup_timeout_sec = 20
-tool_timeout_sec = 60
