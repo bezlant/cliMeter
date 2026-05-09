@@ -179,8 +179,9 @@ class ProfileManager: ObservableObject {
 
     private func detectCLIAccountChange() {
         guard claudeEnabled else { return }
+        let preferFile = fileBasedStorage
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let cliCredential = ClaudeCodeSyncService.readCLICredential()
+            let cliCredential = ClaudeCodeSyncService.readCLICredential(preferFile: preferFile)
             DispatchQueue.main.async {
                 self?.processCLICredential(cliCredential)
             }
@@ -350,9 +351,9 @@ class ProfileManager: ObservableObject {
         }
 
         if toFileBased {
-            for profileID in migratedProfileIDs {
-                try? deleteKeychainCredential(profileID)
-            }
+            // Skip keychain deletion — accessing SecItemDelete triggers
+            // the same macOS password prompts we're trying to avoid.
+            // Stale keychain entries are harmless in file-based mode.
         } else if !cachedCredentials.isEmpty,
                   migratedProfileIDs.count == cachedCredentials.count {
             deleteFileCredentials()
@@ -379,6 +380,11 @@ class ProfileManager: ObservableObject {
                 Log.profiles.error("migrateCredentialStorage: failed to save \(profileID): \(error)")
             }
         )
+
+        if toFileBased, let activeID = cliActiveProfileID,
+           let credential = cachedCredentials[activeID] {
+            ClaudeCodeSyncService.writeCLICredential(credential, preferFile: true)
+        }
     }
 
     private func setupPowerMonitor() {
@@ -473,8 +479,9 @@ class ProfileManager: ObservableObject {
                 self?.cachedCredentials[profileID] = refreshed
                 try? ProfileStore.saveCredentialModel(refreshed, for: profileID)
                 if self?.cliActiveProfileID == profileID {
-                    Log.profiles.info("[\(profileID)] is CLI-active, writing back to CLI keychain...")
-                    ClaudeCodeSyncService.writeCLICredential(refreshed)
+                    let preferFile = self?.fileBasedStorage ?? false
+                    Log.profiles.info("[\(profileID)] is CLI-active, writing back to CLI credential store...")
+                    ClaudeCodeSyncService.writeCLICredential(refreshed, preferFile: preferFile)
                 }
             },
             onAutoStart: { [weak self] credential in
@@ -557,8 +564,8 @@ class ProfileManager: ObservableObject {
 
     func activateForCLI(profileID: UUID) {
         guard let credential = cachedCredentials[profileID] else { return }
-        Log.profiles.info("activateForCLI: switching to \(profileID), writing to CLI keychain...")
-        ClaudeCodeSyncService.writeCLICredential(credential)
+        Log.profiles.info("activateForCLI: switching to \(profileID), writing to CLI credential store...")
+        ClaudeCodeSyncService.writeCLICredential(credential, preferFile: fileBasedStorage)
         cliActiveProfileID = profileID
         ProfileStore.saveCLIActiveProfileID(profileID)
     }

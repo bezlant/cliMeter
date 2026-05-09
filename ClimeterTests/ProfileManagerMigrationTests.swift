@@ -6,7 +6,7 @@ final class ProfileManagerMigrationTests: XCTestCase {
         case writeFailed
     }
 
-    func test_migratingToFileBasedDeletesOnlyProfilesSavedToDestination() {
+    func test_migratingToFileBasedSkipsKeychainDeletion() {
         let successfulID = UUID()
         let failedID = UUID()
         let cached = [
@@ -32,7 +32,7 @@ final class ProfileManagerMigrationTests: XCTestCase {
             }
         )
 
-        XCTAssertEqual(deletedFromKeychain, [successfulID])
+        XCTAssertTrue(deletedFromKeychain.isEmpty)
         XCTAssertEqual(loggedFailures, [failedID])
     }
 

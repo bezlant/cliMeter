@@ -5,10 +5,11 @@ enum ClaudeCodeSyncService {
     private static let serviceName = "Claude Code-credentials"
     private static let account = NSUserName()
 
-    static func readCLICredential() -> Credential? {
+    static func readCLICredential(preferFile: Bool = false) -> Credential? {
         if let fileCred = readCLICredentialFromFile() {
             return fileCred
         }
+        guard !preferFile else { return nil }
         guard let raw = readCLICredentialRaw() else { return nil }
         let credential = Credential(jsonString: raw)
         if credential == nil {
@@ -67,7 +68,38 @@ enum ClaudeCodeSyncService {
         return credential
     }
 
-    static func writeCLICredential(_ credential: Credential) {
+    static func writeCLICredential(_ credential: Credential, preferFile: Bool = false) {
+        if preferFile {
+            writeCLICredentialToFile(credential)
+        } else {
+            writeCLICredentialToKeychain(credential)
+        }
+    }
+
+    private static func writeCLICredentialToFile(_ credential: Credential) {
+        let jsonString = credential.toJSONString()
+        guard let data = jsonString.data(using: .utf8) else { return }
+        let fm = FileManager.default
+        let claudeDir = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude")
+        let credFile = claudeDir.appendingPathComponent(".credentials.json")
+
+        do {
+            try fm.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+
+            let tmpFile = claudeDir.appendingPathComponent(".credentials.tmp")
+            fm.createFile(atPath: tmpFile.path, contents: data,
+                          attributes: [.posixPermissions: 0o600])
+            try fm.replaceItemAt(credFile, withItemAt: tmpFile,
+                                 backupItemName: nil, options: .usingNewMetadataOnly)
+
+            Log.cliSync.info("writeCLICredentialToFile: success")
+        } catch {
+            Log.cliSync.error("writeCLICredentialToFile failed: \(error)")
+        }
+    }
+
+    private static func writeCLICredentialToKeychain(_ credential: Credential) {
         let jsonString = credential.toJSONString()
         guard let data = jsonString.data(using: .utf8) else { return }
 
