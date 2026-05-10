@@ -9,11 +9,14 @@ enum ClaudeCodeSyncService {
         if let fileCred = readCLICredentialFromFile() {
             return fileCred
         }
-        guard !preferFile else { return nil }
         guard let raw = readCLICredentialRaw() else { return nil }
         let credential = Credential(jsonString: raw)
         if credential == nil {
             Log.cliSync.warning("CLI keychain data read OK but failed to parse as Credential")
+        }
+        if preferFile, let credential {
+            Log.cliSync.info("Bootstrapping credential file from keychain")
+            writeCLICredentialToFile(credential)
         }
         return credential
     }
