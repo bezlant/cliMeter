@@ -14,9 +14,9 @@ enum ClaudeCodeSyncService {
         if credential == nil {
             Log.cliSync.warning("CLI keychain data read OK but failed to parse as Credential")
         }
-        if preferFile, let credential {
-            Log.cliSync.info("Bootstrapping credential file from keychain")
-            writeCLICredentialToFile(credential)
+        if preferFile, credential != nil, !cliCredentialFileExists() {
+            Log.cliSync.info("Bootstrapping credential file from keychain (raw)")
+            writeRawToCredentialFile(raw)
         }
         return credential
     }
@@ -91,7 +91,10 @@ enum ClaudeCodeSyncService {
     }
 
     private static func writeCLICredentialToFile(_ credential: Credential) {
-        let jsonString = credential.toJSONString()
+        writeRawToCredentialFile(credential.toJSONString())
+    }
+
+    private static func writeRawToCredentialFile(_ jsonString: String) {
         guard let data = jsonString.data(using: .utf8) else { return }
         let fm = FileManager.default
         let claudeDir = fm.homeDirectoryForCurrentUser
