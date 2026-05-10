@@ -47,7 +47,7 @@ class ProfileManager: ObservableObject {
             }
         }
     }
-    @Published var fileBasedStorage: Bool = false {
+    @Published var fileBasedStorage: Bool = ProfileStore.loadFileBasedStorage() {
         didSet {
             guard oldValue != fileBasedStorage else { return }
             migrateCredentialStorage(toFileBased: fileBasedStorage)
@@ -105,7 +105,6 @@ class ProfileManager: ObservableObject {
         autoSwitchThreshold = ProfileStore.loadAutoSwitchThreshold()
         codexEnabled = ProfileStore.loadCodexEnabled()
         claudeEnabled = ProfileStore.loadClaudeEnabled()
-        fileBasedStorage = ProfileStore.loadFileBasedStorage()
         Log.profiles.info("init: \(self.profiles.count) profiles, \(self.authenticatedProfileIDs.count) authenticated, cliActive=\(self.cliActiveProfileID?.uuidString ?? "none")")
         if claudeEnabled {
             setupAllCoordinators()
@@ -382,7 +381,8 @@ class ProfileManager: ObservableObject {
         )
 
         if toFileBased, let activeID = cliActiveProfileID,
-           let credential = cachedCredentials[activeID] {
+           let credential = cachedCredentials[activeID],
+           !ClaudeCodeSyncService.cliCredentialFileExists() {
             ClaudeCodeSyncService.writeCLICredential(credential, preferFile: true)
         }
     }

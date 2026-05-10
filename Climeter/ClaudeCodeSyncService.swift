@@ -18,6 +18,17 @@ enum ClaudeCodeSyncService {
         return credential
     }
 
+    static func cliCredentialFileExists(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> Bool {
+        let claudeDir = homeDirectory.appendingPathComponent(".claude")
+        let candidates = [
+            claudeDir.appendingPathComponent(".credentials.json"),
+            claudeDir.appendingPathComponent("credentials.json")
+        ]
+        return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
     static func readCLICredentialFromFile(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Credential? {
