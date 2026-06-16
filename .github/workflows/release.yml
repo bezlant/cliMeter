@@ -49,16 +49,18 @@ jobs:
           cd /tmp/homebrew-tap
 
           cat > Casks/climeter.rb << EOF
+          # frozen_string_literal: true
+
           cask "climeter" do
             version "${VERSION}"
             sha256 "${SHA256}"
 
             url "https://github.com/bezlant/cliMeter/releases/download/v#{version}/Climeter.zip"
             name "cliMeter"
-            desc "macOS menu bar app for tracking Claude Code and Codex usage"
+            desc "Menu bar app for tracking Claude Code and Codex usage"
             homepage "https://github.com/bezlant/cliMeter"
 
-            depends_on macos: ">= :sonoma"
+            depends_on macos: :sonoma
 
             app "Climeter.app"
 
@@ -68,9 +70,7 @@ jobs:
                              sudo: false
             end
 
-            zap trash: [
-              "~/Library/Logs/Climeter",
-            ]
+            zap trash: "~/Library/Logs/Climeter"
           end
           EOF
 
