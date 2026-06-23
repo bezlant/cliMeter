@@ -36,7 +36,7 @@ class UsageRefreshCoordinator: ObservableObject {
          onCredentialCached: ((Credential) -> Void)? = nil,
          onAutoStart: ((Credential) -> Void)? = nil,
          usageFetcher: @escaping (Credential) async throws -> UsageData = { try await ClaudeAPIService.fetchUsage(credential: $0) },
-         refresher: @escaping (Credential) async throws -> Credential = { try await ClaudeAPIService.refreshToken($0) }) {
+         refresher: @escaping (Credential) async throws -> Credential = { try await ClaudeAPIService.refreshSelfOwnedToken($0) }) {
         self.profileID = profileID
         self.readOnly = readOnly
         self.credentialProvider = credentialProvider

@@ -10,6 +10,8 @@ enum ProfileStore {
     private static let codexEnabledKey = "codexEnabled"
     private static let peakHoursEnabledKey = "peakHoursEnabled"
     private static let fileBasedStorageKey = "fileBasedCredentialStorage"
+    private static let accountMetaKey = "accountMeta"
+    private static let authenticatedKey = "authenticatedProfiles"
     private static let defaults = UserDefaults.standard
 
     static func loadProfiles() -> [Profile] {
@@ -146,6 +148,11 @@ enum ProfileStore {
         }
     }
 
+    static func deleteCredentialFromAllStores(for profileID: UUID) {
+        try? KeychainService.delete(for: profileID)
+        try? FileCredentialStore.delete(for: profileID)
+    }
+
     // Credential model convenience methods
     static func saveCredentialModel(_ credential: Credential, for profileID: UUID) throws {
         try saveCredential(credential.toJSONString(), for: profileID)
@@ -154,5 +161,44 @@ enum ProfileStore {
     static func loadCredentialModel(for profileID: UUID) -> Credential? {
         guard let raw = try? loadCredential(for: profileID) else { return nil }
         return Credential(jsonString: raw)
+    }
+
+    // MARK: - Account Metadata
+
+    static func saveAccountMetadata(_ cred: Credential, for id: UUID) {
+        var dict = defaults.dictionary(forKey: accountMetaKey) as? [String: [String: String]] ?? [:]
+        var e = dict[id.uuidString] ?? [:]
+        if let v = cred.accountUUID { e["uuid"] = v }
+        if let v = cred.subscriptionType { e["subscriptionType"] = v }
+        if let v = cred.rateLimitTier { e["rateLimitTier"] = v }
+        dict[id.uuidString] = e
+        defaults.set(dict, forKey: accountMetaKey)
+        markAuthenticated(id)
+    }
+
+    static func accountUUID(for id: UUID) -> String? {
+        (defaults.dictionary(forKey: accountMetaKey) as? [String: [String: String]])?[id.uuidString]?["uuid"]
+    }
+
+    static func clearAccountMetadata(_ id: UUID) {
+        var dict = defaults.dictionary(forKey: accountMetaKey) as? [String: [String: String]] ?? [:]
+        dict.removeValue(forKey: id.uuidString)
+        defaults.set(dict, forKey: accountMetaKey)
+    }
+
+    static func markAuthenticated(_ id: UUID) {
+        var s = Set(defaults.stringArray(forKey: authenticatedKey) ?? [])
+        s.insert(id.uuidString)
+        defaults.set(Array(s), forKey: authenticatedKey)
+    }
+
+    static func clearAuthenticated(_ id: UUID) {
+        var s = Set(defaults.stringArray(forKey: authenticatedKey) ?? [])
+        s.remove(id.uuidString)
+        defaults.set(Array(s), forKey: authenticatedKey)
+    }
+
+    static func authenticatedMarkers() -> Set<UUID> {
+        Set((defaults.stringArray(forKey: authenticatedKey) ?? []).compactMap(UUID.init))
     }
 }
