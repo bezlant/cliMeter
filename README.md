@@ -20,13 +20,11 @@ Claude Code and Codex do not keep their usage limits visible while you work. You
 
 - **Menu bar progress bar** — color-coded (green/orange/red) so you know at a glance
 - **Session + weekly tracking** — see both the 5-hour session and 7-day usage windows
-- **Claude multi-account support** — manage multiple Claude accounts, switch between them
-- **Claude auto-switch** — when one Claude account hits 95% utilization, automatically activates the next
+- **Claude multi-account support** — follows the active Claude Code account and preserves known profiles
 - **Codex usage tracking** — shows OpenAI Codex session and weekly plan-limit windows
 - **CLI sync** — picks up Claude Code `/login` credentials and Codex CLI login state
 - **Peak hours indicator** — shows when Claude rate limits are tighter (5–11 AM PT, weekdays) with countdown in your local timezone
 - **Per-provider toggles** — show or hide Claude and Codex independently
-- **File-based credential storage** — optional alternative to macOS Keychain, reduces security prompts
 - **Auto-update check** — notifies you when a new version is available
 
 ## Install
@@ -40,8 +38,6 @@ brew install bezlant/tap/climeter
 ### Manual download
 
 Download `Climeter.zip` from [the latest release](https://github.com/bezlant/cliMeter/releases/latest), unzip, and drag `Climeter.app` to `/Applications`.
-
-> **Note:** The app is not notarized. On first launch, right-click → Open, or go to System Settings → Privacy & Security → Open Anyway.
 
 ### Build from source
 
@@ -71,20 +67,21 @@ That's it. No API keys to paste, no config files to edit.
 
 ## Security
 
-- Claude credentials are stored in macOS Keychain by default, with optional file-based storage
+- Claude credentials are read from Claude Code's macOS Keychain item
+- Claude Code-synced tokens are kept in memory only; cliMeter stores non-secret account metadata locally
 - Codex credentials are read from the Codex CLI auth file managed by `codex login`
-- OAuth tokens with automatic refresh
+- cliMeter never refreshes or writes Claude Code's shared OAuth token
 - No data leaves your machine except provider API calls to Anthropic and OpenAI/ChatGPT usage endpoints
 - No analytics, no telemetry, no tracking
 - Open source — read every line
 
 ## How it works
 
-cliMeter reads the OAuth credentials that Claude Code stores in the system Keychain (or its credentials file) for Claude usage. For Codex usage, it reads the current Codex CLI OAuth login from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`. It polls provider usage endpoints every 3 minutes and displays the result. When tokens expire, it refreshes them silently.
+cliMeter reads the OAuth credentials that Claude Code stores in the system Keychain for Claude usage. It uses the short-lived access token and re-reads the Keychain when needed; it does not refresh or overwrite Claude Code's token. For Codex usage, it reads the current Codex CLI OAuth login from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`. It polls provider usage endpoints every 3 minutes and displays the result.
 
-You can toggle each provider on or off in Settings. File-based credential storage can be enabled to avoid Keychain security prompts — credentials are stored in `~/Library/Application Support/Climeter/credentials.json` instead.
+You can toggle each provider on or off in Settings.
 
-Claude auto-switch applies only to Claude profiles. Codex usage is displayed separately and does not participate in account switching.
+Codex usage is displayed separately and does not participate in Claude profile detection.
 
 ## Requirements
 
