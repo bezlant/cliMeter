@@ -5,11 +5,55 @@ enum ClaudeCodeSyncService {
     private static let serviceName = "Claude Code-credentials"
     private static let account = NSUserName()
 
+    static func credential(fromRaw raw: String) -> Credential? {
+        let c = Credential(jsonString: raw)
+        if c == nil {
+            Log.cliSync.warning("Keychain data parsed-fail as Credential")
+        }
+        return c
+    }
+
+    /// Read-only. interactive=false uses kSecUseAuthenticationUIFail (never prompts).
+    static func readCLICredential(interactive: Bool) -> Credential? {
+        guard let raw = readCLICredentialRaw(interactive: interactive) else { return nil }
+        return credential(fromRaw: raw)
+    }
+
+    static func readCLICredentialRaw(interactive: Bool) -> String? {
+        var q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        if !interactive {
+            q[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        }
+
+        var result: AnyObject?
+        let status = SecItemCopyMatching(q as CFDictionary, &result)
+        Log.cliSync.info("readCLICredential(interactive=\(interactive)): \(Log.keychainStatus(status))")
+
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let str = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return str
+    }
+
+    /// True iff the Keychain item exists & is readable (used to guard file backup).
+    static func keychainItemExists() -> Bool {
+        readCLICredential(interactive: false) != nil
+    }
+
+    @available(*, deprecated, message: "Use readCLICredential(interactive:) for read-only Keychain access.")
     static func readCLICredential(preferFile: Bool = false) -> Credential? {
         if let fileCred = readCLICredentialFromFile() {
             return fileCred
         }
-        guard let raw = readCLICredentialRaw() else { return nil }
+        guard let raw = readCLICredentialRaw(interactive: true) else { return nil }
         let credential = Credential(jsonString: raw)
         if credential == nil {
             Log.cliSync.warning("CLI keychain data read OK but failed to parse as Credential")
@@ -21,6 +65,7 @@ enum ClaudeCodeSyncService {
         return credential
     }
 
+    @available(*, deprecated, message: "File credential probing is obsolete for Claude Code sync.")
     static func cliCredentialFileExists(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Bool {
@@ -32,6 +77,7 @@ enum ClaudeCodeSyncService {
         return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
     }
 
+    @available(*, deprecated, message: "File credential reads are obsolete for Claude Code sync.")
     static func readCLICredentialFromFile(
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Credential? {
@@ -55,33 +101,12 @@ enum ClaudeCodeSyncService {
         return nil
     }
 
+    @available(*, deprecated, message: "Use readCLICredentialRaw(interactive:) for read-only Keychain access.")
     static func readCLICredentialRaw() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        Log.cliSync.info("readCLICredential SecItemCopyMatching: \(Log.keychainStatus(status))")
-
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let credential = String(data: data, encoding: .utf8) else {
-            if status != errSecItemNotFound {
-                Log.cliSync.error("readCLICredential failed: \(Log.keychainStatus(status))")
-            }
-            return nil
-        }
-
-        Log.cliSync.info("readCLICredential succeeded, data length: \(data.count)")
-        return credential
+        readCLICredentialRaw(interactive: true)
     }
 
+    @available(*, deprecated, message: "Claude Code credentials are read-only; avoid writing via sync service.")
     static func writeCLICredential(_ credential: Credential, preferFile: Bool = false) {
         if preferFile {
             writeCLICredentialToFile(credential)
