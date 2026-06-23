@@ -24,34 +24,13 @@ struct SettingsView: View {
                     }
             }
 
-            Section("Credential Storage") {
-                Toggle("Use file-based storage", isOn: $profileManager.fileBasedStorage)
-
-                if profileManager.fileBasedStorage {
-                    HStack {
-                        Text("Location")
-                        Spacer()
-                        Text(FileCredentialStore.credentialsURL().path)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(FileCredentialStore.credentialsURL().path)
-                    }
-                }
-
-                Text("Stores credentials in local files instead of macOS Keychain. Reduces security prompts.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
             Section("Claude (Anthropic)") {
                 Toggle("Show Claude usage", isOn: $profileManager.claudeEnabled)
 
                 HStack {
                     Text("Credentials")
                     Spacer()
-                    Text(profileManager.fileBasedStorage ? "File-based via Claude Code" : "macOS Keychain via Claude Code")
+                    Text("macOS Keychain via Claude Code (read-only)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -136,15 +115,6 @@ struct SettingsView: View {
                             Button("Done") { commitRename() }
                                 .buttonStyle(.borderless)
                         } else {
-                            if profileManager.authenticatedProfileIDs.contains(profile.id),
-                               profileManager.cliActiveProfileID != profile.id {
-                                Button("Activate") {
-                                    profileManager.activateForCLI(profileID: profile.id)
-                                }
-                                .controlSize(.small)
-                                .buttonStyle(.bordered)
-                            }
-
                             Button(action: { startEditing(profile: profile) }) {
                                 Image(systemName: "pencil")
                                     .foregroundColor(.secondary)

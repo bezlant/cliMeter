@@ -48,13 +48,6 @@ class ProfileManager: ObservableObject {
             }
         }
     }
-    @Published var fileBasedStorage: Bool = ProfileStore.loadFileBasedStorage() {
-        didSet {
-            guard oldValue != fileBasedStorage else { return }
-            migrateCredentialStorage(toFileBased: fileBasedStorage)
-        }
-    }
-
     @Published var peakHoursEnabled: Bool = true {
         didSet { ProfileStore.savePeakHoursEnabled(peakHoursEnabled) }
     }
@@ -401,62 +394,6 @@ class ProfileManager: ObservableObject {
             purgeSecret(updated[i].id)
         }
         return updated
-    }
-
-    static func migrateCredentialStorage(
-        toFileBased: Bool,
-        cachedCredentials: [UUID: Credential],
-        saveStorageMode: (Bool) -> Void,
-        saveCredential: (Credential, UUID) throws -> Void,
-        deleteKeychainCredential: (UUID) throws -> Void,
-        deleteFileCredentials: () -> Void,
-        logSaveFailure: (UUID, Error) -> Void
-    ) {
-        saveStorageMode(toFileBased)
-
-        var migratedProfileIDs = Set<UUID>()
-        for (profileID, credential) in cachedCredentials {
-            do {
-                try saveCredential(credential, profileID)
-                migratedProfileIDs.insert(profileID)
-            } catch {
-                logSaveFailure(profileID, error)
-            }
-        }
-
-        if toFileBased {
-            // Skip keychain deletion — accessing SecItemDelete triggers
-            // the same macOS password prompts we're trying to avoid.
-            // Stale keychain entries are harmless in file-based mode.
-        } else if !cachedCredentials.isEmpty,
-                  migratedProfileIDs.count == cachedCredentials.count {
-            deleteFileCredentials()
-        }
-    }
-
-    private func migrateCredentialStorage(toFileBased: Bool) {
-        let selfOwnedCredentials = cachedCredentials.filter { profileID, _ in
-            profiles.first { $0.id == profileID }?.credentialSource == .selfOwned
-        }
-        Log.profiles.info("migrateCredentialStorage: toFileBased=\(toFileBased), \(selfOwnedCredentials.count) self-owned credentials")
-
-        Self.migrateCredentialStorage(
-            toFileBased: toFileBased,
-            cachedCredentials: selfOwnedCredentials,
-            saveStorageMode: { ProfileStore.saveFileBasedStorage($0) },
-            saveCredential: { credential, profileID in
-                try ProfileStore.saveCredentialModel(credential, for: profileID)
-            },
-            deleteKeychainCredential: { profileID in
-                try KeychainService.delete(for: profileID)
-            },
-            deleteFileCredentials: {
-                FileCredentialStore.deleteAll()
-            },
-            logSaveFailure: { profileID, error in
-                Log.profiles.error("migrateCredentialStorage: failed to save \(profileID): \(error)")
-            }
-        )
     }
 
     private func setupPowerMonitor() {

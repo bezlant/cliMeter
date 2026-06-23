@@ -71,10 +71,7 @@ struct PopoverView: View {
                                     lastSuccessAt: profileManager.allLastSuccess[profile.id],
                                     isCLIActive: profileManager.cliActiveProfileID == profile.id,
                                     showProfileName: profileManager.authenticatedProfiles.count > 1,
-                                    currentTime: currentTime,
-                                    onActivate: {
-                                        profileManager.activateForCLI(profileID: profile.id)
-                                    }
+                                    currentTime: currentTime
                                 )
                                 .padding(10)
                                 .background(
@@ -215,7 +212,6 @@ struct ProfileCard: View {
     let isCLIActive: Bool
     let showProfileName: Bool
     let currentTime: Date
-    let onActivate: () -> Void
 
     /// 3× base poll interval. Past this, the data on screen likely no longer
     /// reflects reality (e.g. when the API is rate-limiting us).
@@ -265,12 +261,6 @@ struct ProfileCard: View {
 
                 if let age = staleAge {
                     staleLabel(age)
-                }
-
-                if showProfileName && !isCLIActive {
-                    Button("Use") { onActivate() }
-                        .controlSize(.small)
-                        .buttonStyle(.bordered)
                 }
             }
 
