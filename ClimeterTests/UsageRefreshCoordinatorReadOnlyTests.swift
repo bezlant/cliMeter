@@ -203,6 +203,23 @@ final class UsageRefreshCoordinatorReadOnlyTests: XCTestCase {
         XCTAssertEqual(c.errorMessage, "Rate limited — retrying soon")
     }
 
+    func test_429WithExistingUsageKeepsDataAndPublishesRateLimitError() async {
+        var shouldFail = false
+        let c = make(cached: cred(3600, "cachedValid"),
+                     keychain: { nil },
+                     fetch: { _ in
+                         if shouldFail { throw ClaudeAPIError.httpError(429) }
+                         return .empty
+                     },
+                     refresh: { _ in throw ClaudeAPIError.invalidResponse })
+        await c.refreshForTest()
+        shouldFail = true
+        await c.refreshForTest()
+        XCTAssertNotNil(c.usageData)
+        XCTAssertTrue(c.isStale)
+        XCTAssertEqual(c.errorMessage, "Rate limited — retrying soon")
+    }
+
     func test_cancelledReadOnlyFetchDoesNotPublish() async {
         var resumeFetch: CheckedContinuation<UsageData, Error>?
         let c = make(cached: cred(3600, "cachedValid"),

@@ -57,4 +57,19 @@ final class ClimeterTests: XCTestCase {
             currentTime: now
         ))
     }
+
+    func test_profileCardStaleMessageExplainsRateLimitInsteadOfClaudeCodeWait() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertEqual(
+            ClaudeStalePresentation.waitingMessage(
+                credentialSource: .cliSynced,
+                isStale: true,
+                lastSuccessAt: now.addingTimeInterval(-660),
+                currentTime: now,
+                errorMessage: "Rate limited — retrying soon"
+            ),
+            "Updated 11m ago — rate limited, retrying"
+        )
+    }
 }

@@ -283,10 +283,11 @@ class UsageRefreshCoordinator: ObservableObject {
         if is429 {
             currentInterval = min(currentInterval * 2, maxInterval)
             Log.coordinator.info("[\(self.profileID)] backoff increased → \(self.currentInterval)s")
+            errorMessage = Self.describeError(error, context: "fetch")
             scheduleNextPoll()
         }
 
-        if usageData == nil {
+        if usageData == nil, errorMessage == nil {
             errorMessage = Self.describeError(error, context: "fetch")
         }
     }

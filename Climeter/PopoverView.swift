@@ -227,7 +227,8 @@ enum ClaudeStalePresentation {
         credentialSource: CredentialSource,
         isStale: Bool,
         lastSuccessAt: Date?,
-        currentTime: Date
+        currentTime: Date,
+        errorMessage: String? = nil
     ) -> String? {
         guard isWaiting(
             credentialSource: credentialSource,
@@ -237,6 +238,9 @@ enum ClaudeStalePresentation {
         ) else { return nil }
         guard let lastSuccessAt else { return "Waiting for Claude Code" }
         let age = currentTime.timeIntervalSince(lastSuccessAt)
+        if errorMessage == "Rate limited — retrying soon" {
+            return "Updated \(formatStaleAge(age)) — rate limited, retrying"
+        }
         return "Updated \(formatStaleAge(age)) — waiting for Claude Code"
     }
 
@@ -271,7 +275,8 @@ struct ProfileCard: View {
             credentialSource: profile.credentialSource,
             isStale: isStale,
             lastSuccessAt: lastSuccessAt,
-            currentTime: currentTime
+            currentTime: currentTime,
+            errorMessage: errorMessage
         )
     }
 
