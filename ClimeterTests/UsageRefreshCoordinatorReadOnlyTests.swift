@@ -84,6 +84,27 @@ final class UsageRefreshCoordinatorReadOnlyTests: XCTestCase {
         XCTAssertTrue(c.isStale)
     }
 
+    func test_forcedRefreshBypassesStaleKeychainReadThrottle() async {
+        var reads = 0
+        var fetchedToken: String?
+        let c = make(cached: cred(60, "old"),
+                     keychain: {
+                         reads += 1
+                         return reads == 1 ? self.cred(60, "still-old") : self.cred(3600, "fresh")
+                     },
+                     fetch: {
+                         fetchedToken = $0.accessToken
+                         return .empty
+                     },
+                     refresh: { _ in throw ClaudeAPIError.invalidResponse })
+        await c.refreshForTest()
+        await c.refreshForTest()
+        await c.refreshForTest(forceKeychainReread: true)
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(fetchedToken, "fresh")
+        XCTAssertFalse(c.isStale)
+    }
+
     func test_401_rereadsKeychainOnce_noRefresh() async {
         var refreshed = false
         var reads = 0

@@ -610,7 +610,7 @@ class ProfileManager: ObservableObject {
     func refresh() {
         if claudeEnabled {
             for coordinator in coordinators.values {
-                coordinator.refresh()
+                coordinator.refresh(forceKeychainReread: true)
             }
         }
         if codexEnabled {

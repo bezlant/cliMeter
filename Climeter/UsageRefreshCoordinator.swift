@@ -77,7 +77,7 @@ class UsageRefreshCoordinator: ObservableObject {
         activeTask = nil
     }
 
-    func refresh() {
+    func refresh(forceKeychainReread: Bool = false) {
         guard !isLoading else {
             Log.coordinator.debug("[\(self.profileID)] refresh skipped — already loading")
             return
@@ -87,7 +87,7 @@ class UsageRefreshCoordinator: ObservableObject {
             isLoading = true
             activeTask = Task { @MainActor in
                 defer { self.isLoading = false }
-                await self.runReadOnlyCycle()
+                await self.runReadOnlyCycle(forceKeychainReread: forceKeychainReread)
             }
             return
         }
@@ -160,18 +160,18 @@ class UsageRefreshCoordinator: ObservableObject {
         }
     }
 
-    func refreshForTest() async {
-        await runReadOnlyCycle()
+    func refreshForTest(forceKeychainReread: Bool = false) async {
+        await runReadOnlyCycle(forceKeychainReread: forceKeychainReread)
     }
 
     @MainActor
-    private func runReadOnlyCycle() async {
+    private func runReadOnlyCycle(forceKeychainReread: Bool) async {
         guard !Task.isCancelled else { return }
         let cached = credentialProvider()
         var action = CLICredentialPolicy.action(cached: cached, keychain: nil, now: Date.now)
         if action == .rereadKeychain {
             guard !Task.isCancelled else { return }
-            guard shouldRereadKeychainWhileStale(now: Date.now) else {
+            guard forceKeychainReread || shouldRereadKeychainWhileStale(now: Date.now) else {
                 isStale = true
                 return
             }
