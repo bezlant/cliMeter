@@ -45,6 +45,7 @@
 		1A300011000000000000011 /* ProfileCodableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A300012000000000000012 /* ProfileCodableTests.swift */; };
 		1A500001000000000000001 /* CredentialExpiryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A500002000000000000002 /* CredentialExpiryTests.swift */; };
 		1A600001000000000000001 /* CLICredentialPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A600002000000000000002 /* CLICredentialPolicyTests.swift */; };
+		1A600005000000000000005 /* UsageRefreshCoordinatorReadOnlyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -99,6 +100,7 @@
 		1A300012000000000000012 /* ProfileCodableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileCodableTests.swift; sourceTree = "<group>"; };
 		1A500002000000000000002 /* CredentialExpiryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExpiryTests.swift; sourceTree = "<group>"; };
 		1A600002000000000000002 /* CLICredentialPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLICredentialPolicyTests.swift; sourceTree = "<group>"; };
+		1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageRefreshCoordinatorReadOnlyTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -186,6 +188,7 @@
 				1A300012000000000000012 /* ProfileCodableTests.swift */,
 				1A500002000000000000002 /* CredentialExpiryTests.swift */,
 				1A600002000000000000002 /* CLICredentialPolicyTests.swift */,
+				1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */,
 			);
 			path = ClimeterTests;
 			sourceTree = "<group>";
@@ -325,6 +328,7 @@
 				1A300011000000000000011 /* ProfileCodableTests.swift in Sources */,
 				1A500001000000000000001 /* CredentialExpiryTests.swift in Sources */,
 				1A600001000000000000001 /* CLICredentialPolicyTests.swift in Sources */,
+				1A600005000000000000005 /* UsageRefreshCoordinatorReadOnlyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

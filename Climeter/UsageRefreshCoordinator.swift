@@ -6,10 +6,16 @@ class UsageRefreshCoordinator: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var lastSuccessAt: Date?
+    @Published var isStale: Bool = false
 
     let profileID: UUID
+    let readOnly: Bool
     private let credentialProvider: () -> Credential?
+    private let keychainReader: (() -> Credential?)?
     private let onCredentialRefreshed: ((Credential) -> Void)?
+    private let onCredentialCached: ((Credential) -> Void)?
+    private let usageFetcher: (Credential) async throws -> UsageData
+    private let refresher: (Credential) async throws -> Credential
     private var timer: Timer?
     private var activeTask: Task<Void, Never>?
     static let baseInterval: TimeInterval = 180.0
@@ -19,23 +25,27 @@ class UsageRefreshCoordinator: ObservableObject {
     // and stays locked out for 30+ minutes even at 5-minute retry intervals.
     private let maxInterval: TimeInterval = 900.0
 
-    /// Reads the CLI keychain and updates the credential cache
-    /// if a newer credential is available.
-    private let syncCLICredential: (() -> Void)?
-
     private var lastAutoStartResetTime: Date?
     private let onAutoStart: ((Credential) -> Void)?
 
     init(profileID: UUID,
+         readOnly: Bool,
          credentialProvider: @escaping () -> Credential?,
+         keychainReader: (() -> Credential?)? = nil,
          onCredentialRefreshed: ((Credential) -> Void)? = nil,
-         syncCLICredential: (() -> Void)? = nil,
-         onAutoStart: ((Credential) -> Void)? = nil) {
+         onCredentialCached: ((Credential) -> Void)? = nil,
+         onAutoStart: ((Credential) -> Void)? = nil,
+         usageFetcher: @escaping (Credential) async throws -> UsageData = { try await ClaudeAPIService.fetchUsage(credential: $0) },
+         refresher: @escaping (Credential) async throws -> Credential = { try await ClaudeAPIService.refreshToken($0) }) {
         self.profileID = profileID
+        self.readOnly = readOnly
         self.credentialProvider = credentialProvider
+        self.keychainReader = keychainReader
         self.onCredentialRefreshed = onCredentialRefreshed
-        self.syncCLICredential = syncCLICredential
+        self.onCredentialCached = onCredentialCached
         self.onAutoStart = onAutoStart
+        self.usageFetcher = usageFetcher
+        self.refresher = refresher
     }
 
     func startPolling() {
@@ -71,6 +81,15 @@ class UsageRefreshCoordinator: ObservableObject {
             return
         }
 
+        if readOnly {
+            isLoading = true
+            activeTask = Task { @MainActor in
+                defer { self.isLoading = false }
+                await self.runReadOnlyCycle()
+            }
+            return
+        }
+
         Log.coordinator.info("[\(self.profileID)] poll cycle start (interval: \(self.currentInterval)s)")
 
         guard var credential = credentialProvider() else {
@@ -101,12 +120,13 @@ class UsageRefreshCoordinator: ObservableObject {
             }
 
             do {
-                let fetchedData = try await ClaudeAPIService.fetchUsage(credential: credential)
+                let fetchedData = try await self.usageFetcher(credential)
                 guard !Task.isCancelled else { return }
                 Log.coordinator.info("[\(self.profileID)] usage fetch OK — 5h: \(fetchedData.fiveHour.utilization)%")
                 self.usageData = fetchedData
                 self.errorMessage = nil
                 self.lastSuccessAt = Date()
+                self.isStale = false
                 self.checkAutoStart(credential: credential, usage: fetchedData)
                 self.stepDownBackoff()
             } catch {
@@ -120,12 +140,13 @@ class UsageRefreshCoordinator: ObservableObject {
                 do {
                     credential = try await self.recoverCredential(credential)
                     guard !Task.isCancelled else { return }
-                    let fetchedData = try await ClaudeAPIService.fetchUsage(credential: credential)
+                    let fetchedData = try await self.usageFetcher(credential)
                     guard !Task.isCancelled else { return }
                     Log.coordinator.info("[\(self.profileID)] retry after 401 succeeded — 5h: \(fetchedData.fiveHour.utilization)%")
                     self.usageData = fetchedData
                     self.errorMessage = nil
                     self.lastSuccessAt = Date()
+                    self.isStale = false
                     self.checkAutoStart(credential: credential, usage: fetchedData)
                     self.stepDownBackoff()
                 } catch {
@@ -137,12 +158,87 @@ class UsageRefreshCoordinator: ObservableObject {
         }
     }
 
-    /// Attempt to refresh the credential. On failure, sync from CLI keychain
-    /// and retry with the fresh credential if one was found.
+    func refreshForTest() async {
+        await runReadOnlyCycle()
+    }
+
+    @MainActor
+    private func runReadOnlyCycle() async {
+        guard !Task.isCancelled else { return }
+        let cached = credentialProvider()
+        var action = CLICredentialPolicy.action(cached: cached, keychain: nil, now: Date.now)
+        if action == .rereadKeychain {
+            guard !Task.isCancelled else { return }
+            action = CLICredentialPolicy.action(cached: cached, keychain: keychainReader?(), now: Date.now)
+        }
+        guard !Task.isCancelled else { return }
+
+        switch action {
+        case .fetchUsage(let credential):
+            await fetchReadOnly(credential, fromKeychain: false)
+        case .fetchUsageAndCache(let credential):
+            guard !Task.isCancelled else { return }
+            onCredentialCached?(credential)
+            await fetchReadOnly(credential, fromKeychain: true)
+        case .rereadKeychain, .showStale:
+            guard !Task.isCancelled else { return }
+            isStale = true
+        }
+    }
+
+    @MainActor
+    private func fetchReadOnly(_ credential: Credential, fromKeychain: Bool) async {
+        do {
+            let data = try await usageFetcher(credential)
+            guard !Task.isCancelled else { return }
+            publishSuccess(data, credential: credential, fromKeychain: fromKeychain)
+        } catch ClaudeAPIError.httpError(401) {
+            guard !Task.isCancelled else { return }
+            guard let keychainCredential = keychainReader?(),
+                  keychainCredential.accessToken != credential.accessToken,
+                  !keychainCredential.isExpired else {
+                guard !Task.isCancelled else { return }
+                isStale = true
+                return
+            }
+            guard !Task.isCancelled else { return }
+            onCredentialCached?(keychainCredential)
+            do {
+                let data = try await usageFetcher(keychainCredential)
+                guard !Task.isCancelled else { return }
+                publishSuccess(data, credential: keychainCredential, fromKeychain: true)
+            } catch {
+                guard !Task.isCancelled else { return }
+                isStale = true
+                handleFetchError(error)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            isStale = true
+            handleFetchError(error)
+            if usageData == nil {
+                errorMessage = Self.describeError(error, context: "fetch")
+            }
+        }
+    }
+
+    @MainActor
+    private func publishSuccess(_ data: UsageData, credential: Credential, fromKeychain: Bool) {
+        usageData = data
+        errorMessage = nil
+        lastSuccessAt = Date()
+        isStale = false
+        if fromKeychain {
+            checkAutoStart(credential: credential, usage: data)
+        }
+        stepDownBackoff()
+    }
+
+    /// Attempt to refresh the credential and write it back through the owner.
     private func recoverCredential(_ credential: Credential) async throws -> Credential {
         do {
             Log.coordinator.info("[\(self.profileID)] attempting token refresh via API...")
-            let refreshed = try await ClaudeAPIService.refreshToken(credential)
+            let refreshed = try await refresher(credential)
             try Task.checkCancellation()
             Log.coordinator.info("[\(self.profileID)] token refresh succeeded, writing back...")
             onCredentialRefreshed?(refreshed)
@@ -151,25 +247,8 @@ class UsageRefreshCoordinator: ObservableObject {
             throw CancellationError()
         } catch {
             try Task.checkCancellation()
-            Log.coordinator.warning("[\(self.profileID)] token refresh failed: \(error) — trying CLI keychain fallback")
-            syncCLICredential?()
-            guard let fresh = credentialProvider(),
-                  fresh.refreshToken != credential.refreshToken else {
-                Log.coordinator.error("[\(self.profileID)] CLI keychain had no newer credential, giving up")
-                throw error
-            }
-            Log.coordinator.info("[\(self.profileID)] found different refresh token from CLI keychain")
-            if fresh.isExpired {
-                Log.coordinator.info("[\(self.profileID)] CLI credential also expired, refreshing it...")
-                let refreshed = try await ClaudeAPIService.refreshToken(fresh)
-                try Task.checkCancellation()
-                onCredentialRefreshed?(refreshed)
-                return refreshed
-            }
-            try Task.checkCancellation()
-            Log.coordinator.info("[\(self.profileID)] using fresh CLI credential directly")
-            onCredentialRefreshed?(fresh)
-            return fresh
+            Log.coordinator.warning("[\(self.profileID)] token refresh failed: \(error)")
+            throw error
         }
     }
 

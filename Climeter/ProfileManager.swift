@@ -470,6 +470,7 @@ class ProfileManager: ObservableObject {
 
         let coordinator = UsageRefreshCoordinator(
             profileID: profileID,
+            readOnly: false,
             credentialProvider: { [weak self] in
                 self?.cachedCredentials[profileID]
             },
