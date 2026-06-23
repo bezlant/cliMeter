@@ -19,6 +19,7 @@ class UsageRefreshCoordinator: ObservableObject {
     private var timer: Timer?
     private var activeTask: Task<Void, Never>?
     static let baseInterval: TimeInterval = 180.0
+    static let staleKeychainRereadInterval: TimeInterval = 900.0
     private var currentInterval: TimeInterval = UsageRefreshCoordinator.baseInterval
     // IMPORTANT: max backoff must stay high — Anthropic's /api/oauth/usage
     // endpoint rate-limits aggressively (see anthropics/claude-code#31637)
@@ -26,6 +27,7 @@ class UsageRefreshCoordinator: ObservableObject {
     private let maxInterval: TimeInterval = 900.0
 
     private var lastAutoStartResetTime: Date?
+    private var lastStaleKeychainReadAt: Date?
     private let onAutoStart: ((Credential) -> Void)?
 
     init(profileID: UUID,
@@ -169,6 +171,11 @@ class UsageRefreshCoordinator: ObservableObject {
         var action = CLICredentialPolicy.action(cached: cached, keychain: nil, now: Date.now)
         if action == .rereadKeychain {
             guard !Task.isCancelled else { return }
+            guard shouldRereadKeychainWhileStale(now: Date.now) else {
+                isStale = true
+                return
+            }
+            lastStaleKeychainReadAt = Date.now
             action = CLICredentialPolicy.action(cached: cached, keychain: keychainReader?(), now: Date.now)
         }
         guard !Task.isCancelled else { return }
@@ -184,6 +191,11 @@ class UsageRefreshCoordinator: ObservableObject {
             guard !Task.isCancelled else { return }
             isStale = true
         }
+    }
+
+    private func shouldRereadKeychainWhileStale(now: Date) -> Bool {
+        guard let lastStaleKeychainReadAt else { return true }
+        return now.timeIntervalSince(lastStaleKeychainReadAt) >= Self.staleKeychainRereadInterval
     }
 
     @MainActor
@@ -216,9 +228,6 @@ class UsageRefreshCoordinator: ObservableObject {
             guard !Task.isCancelled else { return }
             isStale = true
             handleFetchError(error)
-            if usageData == nil {
-                errorMessage = Self.describeError(error, context: "fetch")
-            }
         }
     }
 
@@ -228,6 +237,7 @@ class UsageRefreshCoordinator: ObservableObject {
         errorMessage = nil
         lastSuccessAt = Date()
         isStale = false
+        lastStaleKeychainReadAt = nil
         if fromKeychain {
             checkAutoStart(credential: credential, usage: data)
         }

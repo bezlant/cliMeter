@@ -6,6 +6,14 @@ final class ClimeterTests: XCTestCase {
         XCTAssertEqual(UsageWindow(utilization: 12, resetsAt: nil).utilization, 12)
     }
 
+    func test_profileManagerCredentialSourceWiring() {
+        XCTAssertTrue(ProfileManager.usesReadOnlyCoordinator(for: .cliSynced))
+        XCTAssertFalse(ProfileManager.shouldPersistSecret(for: .cliSynced))
+
+        XCTAssertFalse(ProfileManager.usesReadOnlyCoordinator(for: .selfOwned))
+        XCTAssertTrue(ProfileManager.shouldPersistSecret(for: .selfOwned))
+    }
+
     func test_profileCardStaleWaitingMessageUsesCoordinatorFlagOrTenMinuteAge() {
         let now = Date(timeIntervalSince1970: 1_000)
 

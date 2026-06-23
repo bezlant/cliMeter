@@ -13,7 +13,8 @@ class ProfileManager: ObservableObject {
     @Published var codexUsageData: UsageData?
     @Published var codexErrorMessage: String?
     @Published var codexLastSuccessAt: Date?
-    private static let readOnlyMigrationDoneKey = "readOnlyMigrationDone"
+    private static let readOnlyCredentialFileBackupDoneKey = "readOnlyMigrationDone"
+    private static let readOnlyProfileMigrationDoneKey = "readOnlyProfileMigrationDone"
     @Published var claudeEnabled: Bool = true {
         didSet {
             ProfileStore.saveClaudeEnabled(claudeEnabled)
@@ -139,11 +140,15 @@ class ProfileManager: ObservableObject {
     private func persistCredential(_ cred: Credential, for id: UUID) {
         let source = profiles.first { $0.id == id }?.credentialSource ?? .cliSynced
         cachedCredentials[id] = cred
-        if source == .selfOwned {
+        if Self.shouldPersistSecret(for: source) {
             try? ProfileStore.saveCredentialModel(cred, for: id)
         } else {
             ProfileStore.saveAccountMetadata(cred, for: id)
         }
+    }
+
+    static func shouldPersistSecret(for source: CredentialSource) -> Bool {
+        source == .selfOwned
     }
 
     private func readCLICredential(for profileID: UUID) -> Credential? {
@@ -182,7 +187,7 @@ class ProfileManager: ObservableObject {
 
     private func performReadOnlyMigrationIfNeeded() {
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: Self.readOnlyMigrationDoneKey) else { return }
+        let legacyMigrationDone = defaults.bool(forKey: Self.readOnlyCredentialFileBackupDoneKey)
 
         let home = FileManager.default.homeDirectoryForCurrentUser
         let claudeDir = home.appendingPathComponent(".claude")
@@ -190,7 +195,22 @@ class ProfileManager: ObservableObject {
         let fileURL = claudeDir.appendingPathComponent(credentialFileName)
         let backupURL = claudeDir.appendingPathComponent("\(credentialFileName).climeter-bak")
         let keychainExists = ClaudeCodeSyncService.keychainItemExists()
-        profiles = Self.performReadOnlyMigration(
+
+        if !legacyMigrationDone && !defaults.bool(forKey: Self.readOnlyProfileMigrationDoneKey) {
+            profiles = Self.migrateProfilesToReadOnly(
+                profiles: profiles,
+                storedCredential: { ProfileStore.loadCredentialModel(for: $0) },
+                saveMetadata: { credential, profileID in ProfileStore.saveAccountMetadata(credential, for: profileID) },
+                purgeSecret: { ProfileStore.deleteCredentialFromAllStores(for: $0) },
+                markAuthenticated: { ProfileStore.markAuthenticated($0) }
+            )
+            ProfileStore.saveProfiles(profiles)
+            defaults.set(true, forKey: Self.readOnlyProfileMigrationDoneKey)
+        }
+
+        guard !legacyMigrationDone else { return }
+
+        Self.backupStaleCredentialFile(
             keychainExists: keychainExists,
             fileURL: fileURL,
             backupURL: backupURL,
@@ -200,16 +220,10 @@ class ProfileManager: ObservableObject {
                     try? FileManager.default.removeItem(at: destination)
                 }
                 try? FileManager.default.moveItem(at: source, to: destination)
-            },
-            profiles: profiles,
-            storedCredential: { ProfileStore.loadCredentialModel(for: $0) },
-            saveMetadata: { credential, profileID in ProfileStore.saveAccountMetadata(credential, for: profileID) },
-            purgeSecret: { ProfileStore.deleteCredentialFromAllStores(for: $0) },
-            markAuthenticated: { ProfileStore.markAuthenticated($0) }
+            }
         )
-        ProfileStore.saveProfiles(profiles)
         if !FileManager.default.fileExists(atPath: fileURL.path) {
-            defaults.set(true, forKey: Self.readOnlyMigrationDoneKey)
+            defaults.set(true, forKey: Self.readOnlyCredentialFileBackupDoneKey)
         } else if !keychainExists {
             Log.profiles.warning("readOnlyMigration: keychain unavailable; will retry stale file backup next launch")
         } else {
@@ -372,19 +386,13 @@ class ProfileManager: ObservableObject {
         }
     }
 
-    static func performReadOnlyMigration(
-        keychainExists: Bool,
-        fileURL: URL,
-        backupURL: URL,
-        fileExists: (URL) -> Bool,
-        moveFile: (URL, URL) -> Void,
+    static func migrateProfilesToReadOnly(
         profiles: [Profile],
         storedCredential: (UUID) -> Credential?,
         saveMetadata: (Credential, UUID) -> Void,
         purgeSecret: (UUID) -> Void,
         markAuthenticated: (UUID) -> Void
     ) -> [Profile] {
-        if keychainExists, fileExists(fileURL) { moveFile(fileURL, backupURL) }
         var updated = profiles
         for i in updated.indices {
             updated[i].credentialSource = .cliSynced
@@ -395,6 +403,16 @@ class ProfileManager: ObservableObject {
             purgeSecret(updated[i].id)
         }
         return updated
+    }
+
+    static func backupStaleCredentialFile(
+        keychainExists: Bool,
+        fileURL: URL,
+        backupURL: URL,
+        fileExists: (URL) -> Bool,
+        moveFile: (URL, URL) -> Void
+    ) {
+        if keychainExists, fileExists(fileURL) { moveFile(fileURL, backupURL) }
     }
 
     private func setupPowerMonitor() {
@@ -480,7 +498,9 @@ class ProfileManager: ObservableObject {
 
         let source = profiles.first { $0.id == profileID }?.credentialSource ?? .cliSynced
         let coordinator: UsageRefreshCoordinator
-        if source == .cliSynced {
+        if Self.usesReadOnlyCoordinator(for: source) {
+            // The reader may detect a Claude Code account switch while reading.
+            // It must remain read-only toward Claude Code, but can update Climeter profile metadata.
             coordinator = UsageRefreshCoordinator(
                 profileID: profileID,
                 readOnly: true,
@@ -543,6 +563,10 @@ class ProfileManager: ObservableObject {
         cancellables[profileID] = [usageSink, errorSink, lastSuccessSink, staleSink]
         coordinators[profileID] = coordinator
         coordinator.startPolling()
+    }
+
+    static func usesReadOnlyCoordinator(for source: CredentialSource) -> Bool {
+        source == .cliSynced
     }
 
     private func teardownCoordinator(for profileID: UUID) {

@@ -66,6 +66,24 @@ final class UsageRefreshCoordinatorReadOnlyTests: XCTestCase {
         XCTAssertTrue(c.isStale)
     }
 
+    func test_bothExpired_throttlesRepeatedKeychainReadsWhileStale() async {
+        var reads = 0
+        let c = make(cached: cred(60, "old"),
+                     keychain: {
+                         reads += 1
+                         return self.cred(60, "old2")
+                     },
+                     fetch: { _ in
+                         XCTFail("expired tokens should not fetch")
+                         return .empty
+                     },
+                     refresh: { _ in throw ClaudeAPIError.invalidResponse })
+        await c.refreshForTest()
+        await c.refreshForTest()
+        XCTAssertEqual(reads, 1)
+        XCTAssertTrue(c.isStale)
+    }
+
     func test_401_rereadsKeychainOnce_noRefresh() async {
         var refreshed = false
         var reads = 0
