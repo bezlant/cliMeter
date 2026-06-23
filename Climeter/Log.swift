@@ -14,8 +14,7 @@ final class FileLog: @unchecked Sendable {
     private let dateFormatter: DateFormatter
 
     private init() {
-        let logsDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/Climeter")
+        let logsDir = Self.logsDirectory()
         try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
 
         let path = logsDir.appendingPathComponent("climeter.log").path
@@ -31,6 +30,19 @@ final class FileLog: @unchecked Sendable {
         df.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         df.locale = Locale(identifier: "en_US_POSIX")
         self.dateFormatter = df
+    }
+
+    static func logsDirectory(
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        if environment["XCTestConfigurationFilePath"] != nil {
+            return temporaryDirectory
+                .appendingPathComponent("ClimeterTests")
+                .appendingPathComponent("Logs")
+        }
+        return homeDirectory.appendingPathComponent("Library/Logs/Climeter")
     }
 
     func write(level: String, category: String, message: String) {

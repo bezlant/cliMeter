@@ -72,4 +72,27 @@ final class ClimeterTests: XCTestCase {
             "Updated 11m ago — rate limited, retrying"
         )
     }
+
+    func test_fileLogUsesTemporaryDirectoryUnderXCTest() {
+        let home = URL(fileURLWithPath: "/Users/test")
+        let temp = URL(fileURLWithPath: "/tmp")
+
+        XCTAssertEqual(
+            FileLog.logsDirectory(
+                homeDirectory: home,
+                temporaryDirectory: temp,
+                environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"]
+            ).path,
+            "/tmp/ClimeterTests/Logs"
+        )
+
+        XCTAssertEqual(
+            FileLog.logsDirectory(
+                homeDirectory: home,
+                temporaryDirectory: temp,
+                environment: [:]
+            ).path,
+            "/Users/test/Library/Logs/Climeter"
+        )
+    }
 }
