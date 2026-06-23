@@ -4,95 +4,93 @@
 
 **Goal:** Make Climeter a strictly read-only consumer of Claude Code's Keychain credential so it never rotates the shared OAuth refresh token (which breaks `/login`) and never goes permanently stale.
 
-**Architecture:** Introduce a persisted `CredentialSource` (`cliSynced` vs `selfOwned`) on `Profile`. For `cliSynced` profiles, isolate the "what to do on each poll" decision into a **pure function** (`CLICredentialPolicy`) that can only ever return *fetch / reread-keychain / show-stale* — never *refresh* and never *write*. Refactor `UsageRefreshCoordinator` to take injected closures (keychain reader, usage fetcher, optional refresher) so the never-refresh invariant is unit-testable. Remove all five Claude-Code-store mutation sites. Abandon the `~/.claude/.credentials.json` path on macOS.
+**Architecture:** Add a persisted `CredentialSource` (`cliSynced` vs `selfOwned`) on `Profile`. For `cliSynced` profiles, the per-poll decision lives in a **pure function** (`CLICredentialPolicy`) that can only return *fetch / reread-keychain / show-stale* — never *refresh*, never *write*. `UsageRefreshCoordinator` gains a `readOnly` mode with injected closures (keychain reader, usage fetcher) so the never-refresh invariant is unit-testable. Every Claude-Code-store mutation is removed. `cliSynced` tokens live **in memory only**; disk holds non-secret metadata + an authenticated marker. The `~/.claude/.credentials.json` path is abandoned on macOS.
 
 **Tech Stack:** Swift 5, SwiftUI, XCTest, macOS Keychain (Security framework), `xcodebuild`.
 
 **Spec:** `docs/superpowers/specs/2026-06-23-readonly-credentials-design.md`
 
-**Test command (use everywhere below):**
+**Test command (use everywhere):**
 ```bash
 xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
   -destination 'platform=macOS' -only-testing:ClimeterTests 2>&1 | tail -30
 ```
 Single test: append `-only-testing:ClimeterTests/<Class>/<method>`.
+Build only: `xcodebuild build -project Climeter.xcodeproj -scheme Climeter -destination 'platform=macOS' 2>&1 | tail -15`.
+
+---
+
+## Complete inventory of sites to remove/gate (verified against source)
+
+Every one of these MUST be addressed or the bug returns. Tasks reference these IDs.
+
+| ID | Site | Current behavior | Required change |
+|----|------|------------------|-----------------|
+| A1 | `UsageRefreshCoordinator.recoverCredential:145` | refresh on expiry | not reached in readOnly mode |
+| A2 | `UsageRefreshCoordinator.recoverCredential:164` | refresh CLI fallback | dead (`syncCLICredential` always nil) → remove |
+| B  | `ProfileManager.identifyAndSyncAccount:219` | `refreshToken` on launch/wake | remove; no refresh |
+| C  | `ProfileManager.setupCoordinator:484` `onCredentialRefreshed` | `writeCLICredential` to CC | readOnly: never write CC |
+| D1 | `ProfileManager.activateForCLI:568` | `writeCLICredential` to CC | remove the write |
+| D2 | `ProfileManager.checkAutoSwitch:549` → `activateForCLI` | switches CC account | gate to `selfOwned` (dead until paste-UI) |
+| E  | `ProfileManager.migrateCredentialStorage:386` | `writeCLICredential` to CC file | remove block |
+| P1 | `ProfileManager.saveAndActivate:288` | `saveCredentialModel` (secret→disk) | cliSynced: metadata only |
+| P2 | `ProfileManager.identifyAndSyncAccount:261` | `saveCredentialModel` (secret→disk) | cliSynced: metadata only |
+| P3 | `ProfileManager.backfillAccountUUIDs:323` | `saveCredentialModel` (secret→disk) | cliSynced: metadata only |
+| R1 | `ProfileManager.detectCLIAccountChange:183` | `readCLICredential(preferFile:)` | `readCLICredential(interactive:false)` |
+| R2 | `ProfileManager.startCLIMonitoring:169` | 30s keychain poll timer | remove timer |
+
+> Re-verify before finishing: `grep -rn "refreshToken(\|writeCLICredential\|saveCredentialModel" Climeter/` — every hit must be in a `selfOwned` branch or removed.
 
 ---
 
 ## File Structure
 
-| File | Responsibility | Change |
-|------|----------------|--------|
-| `Climeter/Profile.swift` | Profile model | add persisted `credentialSource` |
-| `Climeter/Credential.swift` | OAuth credential value | add `isExpired(now:)` for injectable time |
-| `Climeter/CLICredentialPolicy.swift` | **NEW** pure poll-decision logic | create |
-| `Climeter/ClaudeCodeSyncService.swift` | read CC Keychain | remove file + write paths; keep keychain read |
-| `Climeter/UsageRefreshCoordinator.swift` | per-profile polling | inject closures; read-only mode; stale + backoff |
-| `Climeter/ProfileManager.swift` | orchestration | remove 5 mutation sites; wire `credentialSource`; in-memory CLI tokens; rare reads |
-| `Climeter/ProfileStore.swift` | persistence | rename file-storage toggle scope; migration helper |
-| `Climeter/SettingsView.swift` | settings UI | remove/rename toggle; remove Activate for Claude |
-| `Climeter/PopoverView.swift` | menu UI | remove Activate; stale text + Retry |
-| `Climeter/MenuBarIcon.swift` | menu bar glyph | dim/dot when stale |
-| `ClimeterTests/*` | tests | new policy/migration tests; delete obsolete file-read tests |
+| File | Change |
+|------|--------|
+| `Climeter/Profile.swift` | add persisted `credentialSource` |
+| `Climeter/Credential.swift` | `isExpired(now:)`; `Equatable` (all fields) |
+| `Climeter/CLICredentialPolicy.swift` | **NEW** pure decision |
+| `Climeter/ClaudeCodeSyncService.swift` | keychain-read-only; `interactive:` probe; `keychainItemExists()` |
+| `Climeter/UsageRefreshCoordinator.swift` | readOnly mode, injected closures, stale, 401 re-read |
+| `Climeter/ProfileManager.swift` | remove A–E; gate P1–P3; R1–R2; cold-launch marker; migration |
+| `Climeter/ProfileStore.swift` | account metadata + authenticated marker; scope file-toggle |
+| `Climeter/SettingsView.swift`, `PopoverView.swift`, `MenuBarIcon.swift` | UI: remove toggle/Activate; stale indicator |
+| `ClimeterTests/*` | new policy/coordinator/migration tests; delete obsolete file-read tests |
 
 ---
 
 ## Task 0: Baseline
 
-- [ ] **Step 1: Confirm the suite is green before changes**
-
-Run:
-```bash
-xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
-  -destination 'platform=macOS' -only-testing:ClimeterTests 2>&1 | tail -30
-```
-Expected: `** TEST SUCCEEDED **`. If not, stop and report — do not build on a red baseline.
+- [ ] **Step 1:** Run the full test command. Expected `** TEST SUCCEEDED **`. If red, stop and report.
 
 ---
 
-## Task 1: `CredentialSource` on the Profile model
+## Task 1: `CredentialSource` on Profile
 
-**Files:**
-- Modify: `Climeter/Profile.swift`
-- Test: `ClimeterTests/ProfileCodableTests.swift` (create)
+**Files:** `Climeter/Profile.swift`; Test `ClimeterTests/ProfileCodableTests.swift` (create)
 
-- [ ] **Step 1: Write the failing test**
-
-Create `ClimeterTests/ProfileCodableTests.swift`:
+- [ ] **Step 1: Failing test**
 ```swift
 import XCTest
 @testable import Climeter
 
 final class ProfileCodableTests: XCTestCase {
     func test_defaultSourceIsCLISynced() {
-        let p = Profile(name: "X")
-        XCTAssertEqual(p.credentialSource, .cliSynced)
+        XCTAssertEqual(Profile(name: "X").credentialSource, .cliSynced)
     }
-
-    func test_decodingLegacyProfileWithoutSourceDefaultsToCLISynced() throws {
-        // Profiles persisted before this field existed have no `credentialSource` key.
+    func test_legacyProfileWithoutSourceDefaultsToCLISynced() throws {
         let legacy = #"{"id":"\#(UUID().uuidString)","name":"Old"}"#.data(using: .utf8)!
-        let p = try JSONDecoder().decode(Profile.self, from: legacy)
-        XCTAssertEqual(p.credentialSource, .cliSynced)
+        XCTAssertEqual(try JSONDecoder().decode(Profile.self, from: legacy).credentialSource, .cliSynced)
     }
-
     func test_roundTripPreservesSelfOwned() throws {
-        var p = Profile(name: "Manual")
-        p.credentialSource = .selfOwned
-        let data = try JSONEncoder().encode(p)
-        let back = try JSONDecoder().decode(Profile.self, from: data)
+        var p = Profile(name: "Manual"); p.credentialSource = .selfOwned
+        let back = try JSONDecoder().decode(Profile.self, from: JSONEncoder().encode(p))
         XCTAssertEqual(back.credentialSource, .selfOwned)
     }
 }
 ```
-
-- [ ] **Step 2: Run it, verify it fails**
-
-Run the single-class test. Expected: compile failure (`credentialSource` unknown).
-
-- [ ] **Step 3: Implement**
-
-Replace `Climeter/Profile.swift` contents:
+- [ ] **Step 2:** Run the class → fails (unknown member).
+- [ ] **Step 3: Implement** — replace `Climeter/Profile.swift`:
 ```swift
 import Foundation
 
@@ -113,6 +111,7 @@ struct Profile: Codable, Identifiable {
     }
 
     // Custom decode so profiles persisted before this field default to .cliSynced.
+    // CodingKeys + encode(to:) remain auto-synthesized; do NOT add a manual CodingKeys.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
@@ -121,634 +120,613 @@ struct Profile: Codable, Identifiable {
     }
 }
 ```
-
-- [ ] **Step 4: Run tests, verify pass**
-
-Run the class. Expected: PASS.
-
-- [ ] **Step 5: Commit**
-```bash
-git add Climeter/Profile.swift ClimeterTests/ProfileCodableTests.swift
-git commit -m "feat: add CredentialSource to Profile (defaults cliSynced)"
-```
+- [ ] **Step 4:** Run → pass.
+- [ ] **Step 5: Commit** `feat: add CredentialSource to Profile (defaults cliSynced)`
 
 ---
 
-## Task 2: Injectable expiry on `Credential`
+## Task 2: Injectable expiry + full Equatable on `Credential`
 
-**Files:**
-- Modify: `Climeter/Credential.swift`
-- Test: `ClimeterTests/CredentialExpiryTests.swift` (create)
+**Files:** `Climeter/Credential.swift`; Test `ClimeterTests/CredentialExpiryTests.swift` (create)
 
 - [ ] **Step 1: Failing test**
-
-Create `ClimeterTests/CredentialExpiryTests.swift`:
 ```swift
 import XCTest
 @testable import Climeter
 
 final class CredentialExpiryTests: XCTestCase {
-    private func cred(expiresAtMillis: Double) -> Credential {
-        Credential(jsonString: """
-        {"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":\(expiresAtMillis)}}
-        """)!
+    private func cred(_ millis: Double) -> Credential {
+        Credential(jsonString: #"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":\#(millis)}}"#)!
     }
-
-    func test_notExpiredWellBeforeExpiry() {
-        let now = Date(timeIntervalSince1970: 1000)
-        let c = cred(expiresAtMillis: 1000_000 * 1000) // far future
-        XCTAssertFalse(c.isExpired(now: now))
+    func test_notExpiredFarFuture() {
+        XCTAssertFalse(cred(9_000_000 * 1000).isExpired(now: Date(timeIntervalSince1970: 1000)))
     }
-
     func test_expiredWithinFiveMinuteMargin() {
-        let now = Date(timeIntervalSince1970: 1000)
-        // expires 4 min after now -> considered expired (5 min safety margin)
-        let c = cred(expiresAtMillis: (1000 + 240) * 1000)
-        XCTAssertTrue(c.isExpired(now: now))
+        // expires 4 min after now -> expired (5-min safety margin)
+        XCTAssertTrue(cred((1000 + 240) * 1000).isExpired(now: Date(timeIntervalSince1970: 1000)))
+    }
+    func test_equalityIncludesAccountUUID() {
+        let a = Credential(jsonString: #"{"claudeAiOauth":{"accessToken":"x","refreshToken":"r","expiresAt":1000,"accountUUID":"A"}}"#)!
+        let b = Credential(jsonString: #"{"claudeAiOauth":{"accessToken":"x","refreshToken":"r","expiresAt":1000,"accountUUID":"B"}}"#)!
+        XCTAssertNotEqual(a, b)
     }
 }
 ```
-
-- [ ] **Step 2: Run, verify fails** (`isExpired(now:)` unknown).
-
-- [ ] **Step 3: Implement** — in `Climeter/Credential.swift` replace the `isExpired` computed property:
+- [ ] **Step 2:** Run → fails.
+- [ ] **Step 3: Implement** — in `Climeter/Credential.swift`, replace the `isExpired` computed property with:
 ```swift
-    func isExpired(now: Date) -> Bool {
-        expiresAt < now.addingTimeInterval(5 * 60)
-    }
-
+    func isExpired(now: Date) -> Bool { expiresAt < now.addingTimeInterval(5 * 60) }
     var isExpired: Bool { isExpired(now: Date.now) }
 ```
-
-- [ ] **Step 4: Run, verify pass.**
-
-- [ ] **Step 5: Commit**
-```bash
-git add Climeter/Credential.swift ClimeterTests/CredentialExpiryTests.swift
-git commit -m "feat: add injectable Credential.isExpired(now:)"
+and add at end of file (compare ALL stored fields, incl. account identity):
+```swift
+extension Credential: Equatable {
+    static func == (l: Credential, r: Credential) -> Bool {
+        l.accessToken == r.accessToken && l.refreshToken == r.refreshToken &&
+        l.expiresAt == r.expiresAt && l.subscriptionType == r.subscriptionType &&
+        l.rateLimitTier == r.rateLimitTier && l.accountUUID == r.accountUUID
+    }
+}
 ```
+- [ ] **Step 4:** Run → pass.
+- [ ] **Step 5: Commit** `feat: injectable Credential.isExpired(now:) + full Equatable`
 
 ---
 
-## Task 3: Pure poll-decision policy (the never-refresh invariant)
+## Task 3: Pure poll-decision policy
 
-**Files:**
-- Create: `Climeter/CLICredentialPolicy.swift`
-- Test: `ClimeterTests/CLICredentialPolicyTests.swift`
-
-This pure function encodes the entire cliSynced decision. It has **no `refresh` case**, so the regression is impossible by construction, and it is trivially testable.
+**Files:** `Climeter/CLICredentialPolicy.swift` (create); Test `ClimeterTests/CLICredentialPolicyTests.swift` (create)
 
 - [ ] **Step 1: Failing test**
-
-Create `ClimeterTests/CLICredentialPolicyTests.swift`:
 ```swift
 import XCTest
 @testable import Climeter
 
 final class CLICredentialPolicyTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 10_000)
-    private func cred(at expiresSecsFromNow: Double, token: String) -> Credential {
-        let millis = (10_000 + expiresSecsFromNow) * 1000
-        return Credential(jsonString: """
-        {"claudeAiOauth":{"accessToken":"\(token)","refreshToken":"r","expiresAt":\(millis)}}
-        """)!
+    private func cred(_ secsFromNow: Double, _ token: String) -> Credential {
+        Credential(jsonString: #"{"claudeAiOauth":{"accessToken":"\#(token)","refreshToken":"r","expiresAt":\#((10_000 + secsFromNow) * 1000)}}"#)!
     }
-
-    func test_cachedValid_fetchesWithCached() {
-        let cached = cred(at: 3600, token: "cachedAT")
-        let action = CLICredentialPolicy.action(cached: cached, keychain: nil, now: now)
-        XCTAssertEqual(action, .fetchUsage(cached))
+    func test_cachedValid_fetchesCached() {
+        let c = cred(3600, "cached")
+        XCTAssertEqual(CLICredentialPolicy.action(cached: c, keychain: nil, now: now), .fetchUsage(c))
     }
-
-    func test_cachedExpired_noKeychainGiven_rereadsKeychain() {
-        let cached = cred(at: 60, token: "old") // within 5-min margin -> expired
-        let action = CLICredentialPolicy.action(cached: cached, keychain: nil, now: now)
-        XCTAssertEqual(action, .rereadKeychain)
+    func test_cachedExpired_noKeychainYet_rereads() {
+        XCTAssertEqual(CLICredentialPolicy.action(cached: cred(60, "old"), keychain: nil, now: now), .rereadKeychain)
     }
-
-    func test_cachedExpired_keychainFresh_fetchesAndCachesKeychain() {
-        let cached = cred(at: 60, token: "old")
-        let fresh = cred(at: 3600, token: "freshAT")
-        let action = CLICredentialPolicy.action(cached: cached, keychain: fresh, now: now)
-        XCTAssertEqual(action, .fetchUsageAndCache(fresh))
+    func test_cachedExpired_keychainFresh_fetchAndCache() {
+        let fresh = cred(3600, "fresh")
+        XCTAssertEqual(CLICredentialPolicy.action(cached: cred(60, "old"), keychain: fresh, now: now), .fetchUsageAndCache(fresh))
     }
-
-    func test_cachedExpired_keychainAlsoExpired_showsStale() {
-        let cached = cred(at: 60, token: "old")
-        let staleKeychain = cred(at: 60, token: "alsoOld")
-        let action = CLICredentialPolicy.action(cached: cached, keychain: staleKeychain, now: now)
-        XCTAssertEqual(action, .showStale)
+    func test_bothExpired_stale() {
+        XCTAssertEqual(CLICredentialPolicy.action(cached: cred(60, "old"), keychain: cred(60, "old2"), now: now), .showStale)
     }
-
-    func test_noCached_keychainFresh_fetchesAndCaches() {
-        let fresh = cred(at: 3600, token: "freshAT")
-        let action = CLICredentialPolicy.action(cached: nil, keychain: fresh, now: now)
-        XCTAssertEqual(action, .fetchUsageAndCache(fresh))
+    func test_noCached_keychainFresh_fetchAndCache() {
+        let fresh = cred(3600, "fresh")
+        XCTAssertEqual(CLICredentialPolicy.action(cached: nil, keychain: fresh, now: now), .fetchUsageAndCache(fresh))
     }
-
-    func test_noCached_noKeychain_rereadsKeychain() {
+    func test_noCached_noKeychain_rereads() {
         XCTAssertEqual(CLICredentialPolicy.action(cached: nil, keychain: nil, now: now), .rereadKeychain)
     }
 }
 ```
-(`Credential` must be `Equatable` for `.fetchUsage(cred)` comparisons — added in Step 3.)
-
-- [ ] **Step 2: Run, verify fails.**
-
-- [ ] **Step 3: Implement**
-
-In `Climeter/Credential.swift`, add `Equatable` conformance (compare on the fields that matter):
-```swift
-extension Credential: Equatable {
-    static func == (l: Credential, r: Credential) -> Bool {
-        l.accessToken == r.accessToken &&
-        l.refreshToken == r.refreshToken &&
-        l.expiresAt == r.expiresAt
-    }
-}
-```
-
-Create `Climeter/CLICredentialPolicy.swift`:
+- [ ] **Step 2:** Run → fails.
+- [ ] **Step 3: Implement** `Climeter/CLICredentialPolicy.swift`:
 ```swift
 import Foundation
 
 /// Pure decision for a read-only (cliSynced) profile's poll cycle.
-/// There is deliberately NO `refresh` case: Climeter must never rotate
-/// Claude Code's shared refresh token.
+/// Deliberately NO `refresh` case — Climeter must never rotate the shared token.
 enum CLIRefreshAction: Equatable {
     case fetchUsage(Credential)          // cached access token still valid
-    case fetchUsageAndCache(Credential)  // use this freshly-read keychain token, update cache
+    case fetchUsageAndCache(Credential)  // use freshly-read keychain token, update cache
     case rereadKeychain                  // need a keychain read to decide
     case showStale                       // nothing usable; keep last usage, mark stale
 }
 
 enum CLICredentialPolicy {
-    /// - Parameters:
-    ///   - cached: in-memory access token from a previous keychain read (if any)
-    ///   - keychain: a just-read keychain credential, or nil if not yet read this cycle
     static func action(cached: Credential?, keychain: Credential?, now: Date) -> CLIRefreshAction {
-        if let cached, !cached.isExpired(now: now) {
-            return .fetchUsage(cached)
-        }
+        if let cached, !cached.isExpired(now: now) { return .fetchUsage(cached) }
         guard let keychain else { return .rereadKeychain }
-        if !keychain.isExpired(now: now) {
-            return .fetchUsageAndCache(keychain)
-        }
-        return .showStale
+        return keychain.isExpired(now: now) ? .showStale : .fetchUsageAndCache(keychain)
     }
 }
 ```
-
-- [ ] **Step 4: Run, verify pass.**
-
-- [ ] **Step 5: Commit**
-```bash
-git add Climeter/CLICredentialPolicy.swift Climeter/Credential.swift ClimeterTests/CLICredentialPolicyTests.swift
-git commit -m "feat: pure CLICredentialPolicy with no refresh path"
-```
+- [ ] **Step 4:** Run → pass.
+- [ ] **Step 5: Commit** `feat: pure CLICredentialPolicy with no refresh path`
 
 ---
 
-## Task 4: `ClaudeCodeSyncService` — keychain-read only
+## Task 4: `ClaudeCodeSyncService` — keychain-read-only
 
-**Files:**
-- Modify: `Climeter/ClaudeCodeSyncService.swift`
-- Delete: `ClimeterTests/CLISyncFileReadTests.swift`
-- Test: `ClimeterTests/ClaudeCodeSyncServiceTests.swift` (create)
+**Files:** `Climeter/ClaudeCodeSyncService.swift`; delete `ClimeterTests/CLISyncFileReadTests.swift`; Test `ClimeterTests/ClaudeCodeSyncServiceTests.swift` (create)
 
-- [ ] **Step 1: Delete the obsolete file-read tests**
-```bash
-git rm ClimeterTests/CLISyncFileReadTests.swift
-```
+> Tasks 4 and 5 add NEW code without deleting callers yet, so the project still
+> compiles after each. Task 6 removes the old `ProfileManager` usages. To keep Task 4
+> green, **keep the old methods as thin deprecated shims** that the new code/tests
+> ignore; Task 6 deletes them. (Avoids an un-compilable intermediate — reviewer M8.)
 
-- [ ] **Step 2: Failing test for the new surface**
-
-Create `ClimeterTests/ClaudeCodeSyncServiceTests.swift`:
+- [ ] **Step 1:** `git rm ClimeterTests/CLISyncFileReadTests.swift`
+- [ ] **Step 2: Failing test**
 ```swift
 import XCTest
 @testable import Climeter
 
 final class ClaudeCodeSyncServiceTests: XCTestCase {
-    func test_credentialFromRawParsesKeychainJSON() {
-        let raw = """
-        {"claudeAiOauth":{"accessToken":"kc-at","refreshToken":"kc-rt","expiresAt":1700000000000}}
-        """
-        let cred = ClaudeCodeSyncService.credential(fromRaw: raw)
-        XCTAssertEqual(cred?.accessToken, "kc-at")
+    func test_credentialFromRawParses() {
+        let raw = #"{"claudeAiOauth":{"accessToken":"kc","refreshToken":"r","expiresAt":1700000000000}}"#
+        XCTAssertEqual(ClaudeCodeSyncService.credential(fromRaw: raw)?.accessToken, "kc")
     }
-
-    func test_credentialFromRawReturnsNilForGarbage() {
-        XCTAssertNil(ClaudeCodeSyncService.credential(fromRaw: "not json"))
+    func test_credentialFromRawNilForGarbage() {
+        XCTAssertNil(ClaudeCodeSyncService.credential(fromRaw: "nope"))
     }
 }
 ```
-
-- [ ] **Step 3: Rewrite the service** — replace `Climeter/ClaudeCodeSyncService.swift` with a keychain-read-only version. Remove `readCLICredentialFromFile`, `writeCLICredentialToFile`, `writeRawToCredentialFile`, `writeCLICredential`, `writeCLICredentialToKeychain`, `makeSharedAccess`, `cliCredentialFileExists`, and the `preferFile` bootstrap. Keep the keychain read; add a non-interactive `probe` variant and a small testable parse helper:
-
+- [ ] **Step 3:** Run → fails (`credential(fromRaw:)` unknown).
+- [ ] **Step 4: Implement** — add the new read-only surface to `ClaudeCodeSyncService` (keep old `readCLICredential(preferFile:)`/`writeCLICredential` as `@available(*, deprecated)` shims until Task 6):
 ```swift
-import Foundation
-import Security
+    static func credential(fromRaw raw: String) -> Credential? {
+        let c = Credential(jsonString: raw)
+        if c == nil { Log.cliSync.warning("Keychain data parsed-fail as Credential") }
+        return c
+    }
 
-enum ClaudeCodeSyncService {
-    private static let serviceName = "Claude Code-credentials"
-    private static let account = NSUserName()
-
-    /// Read Claude Code's credential from the macOS Keychain. Read-only.
-    /// `interactive == false` uses kSecUseAuthenticationUIFail so it never
-    /// shows a password prompt (used for background/scheduled reads).
+    /// Read-only. interactive=false uses kSecUseAuthenticationUIFail (never prompts).
     static func readCLICredential(interactive: Bool) -> Credential? {
         guard let raw = readCLICredentialRaw(interactive: interactive) else { return nil }
         return credential(fromRaw: raw)
     }
 
-    static func credential(fromRaw raw: String) -> Credential? {
-        let c = Credential(jsonString: raw)
-        if c == nil {
-            Log.cliSync.warning("Keychain data read OK but failed to parse as Credential")
-        }
-        return c
-    }
-
     static func readCLICredentialRaw(interactive: Bool) -> String? {
-        var query: [String: Any] = [
+        var q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceName,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecAttrService as String: serviceName, kSecAttrAccount as String: account,
+            kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne
         ]
-        if !interactive {
-            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
-        }
-
+        if !interactive { q[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail }
         var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        Log.cliSync.info("readCLICredential (interactive=\(interactive)): \(Log.keychainStatus(status))")
-
-        guard status == errSecSuccess,
-              let data = result as? Data,
-              let str = String(data: data, encoding: .utf8) else {
-            if status != errSecItemNotFound && status != errSecInteractionNotAllowed {
-                Log.cliSync.error("readCLICredential failed: \(Log.keychainStatus(status))")
-            }
-            return nil
-        }
+        let status = SecItemCopyMatching(q as CFDictionary, &result)
+        Log.cliSync.info("readCLICredential(interactive=\(interactive)): \(Log.keychainStatus(status))")
+        guard status == errSecSuccess, let data = result as? Data,
+              let str = String(data: data, encoding: .utf8) else { return nil }
         return str
     }
-}
+
+    /// True iff the Keychain item exists & is readable (used to guard file backup).
+    static func keychainItemExists() -> Bool {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceName, kSecAttrAccount as String: account,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        return SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess
+    }
 ```
-
-- [ ] **Step 4: Fix call sites so the project compiles.** Build will now fail wherever the deleted methods were used (`ProfileManager`). That is expected and is fixed in Task 6. To keep this task self-contained, temporarily compile by running only this test target file is not possible (whole target compiles). Therefore: **do Task 5 and Task 6 before running the full build.** Mark this task's test deferred to the end of Task 6.
-
-> NOTE: Tasks 4–6 form one compile unit. Implement all three, then run the suite once at the end of Task 6.
-
-- [ ] **Step 5: Commit (WIP, compiles after Task 6)**
-```bash
-git add Climeter/ClaudeCodeSyncService.swift ClimeterTests/ClaudeCodeSyncServiceTests.swift
-git commit -m "refactor: ClaudeCodeSyncService is keychain-read-only (WIP, compiles w/ Task 6)"
-```
+- [ ] **Step 5:** Run the suite → green (old shims keep callers compiling).
+- [ ] **Step 6: Commit** `feat: keychain-read-only API on ClaudeCodeSyncService`
 
 ---
 
-## Task 5: `UsageRefreshCoordinator` — injected closures + read-only mode
+## Task 5: `UsageRefreshCoordinator` — readOnly mode
 
-**Files:**
-- Modify: `Climeter/UsageRefreshCoordinator.swift`
-- Test: `ClimeterTests/UsageRefreshCoordinatorReadOnlyTests.swift` (create)
+**Files:** `Climeter/UsageRefreshCoordinator.swift`; Test `ClimeterTests/UsageRefreshCoordinatorReadOnlyTests.swift` (create)
 
-Add a `readOnly` flag and an injected `keychainReader`. When `readOnly`, the coordinator drives off `CLICredentialPolicy` and **never** calls `refreshToken`/`onCredentialRefreshed`.
-
-- [ ] **Step 1: Failing test (never-refresh invariant at the coordinator level)**
-
-Create `ClimeterTests/UsageRefreshCoordinatorReadOnlyTests.swift`:
+- [ ] **Step 1: Failing tests** (never-refresh + stale + 401 re-read)
 ```swift
 import XCTest
 @testable import Climeter
 
 @MainActor
 final class UsageRefreshCoordinatorReadOnlyTests: XCTestCase {
-    private func cred(expiresSecsFromNow: Double, token: String) -> Credential {
-        let millis = (Date.now.timeIntervalSince1970 + expiresSecsFromNow) * 1000
-        return Credential(jsonString: """
-        {"claudeAiOauth":{"accessToken":"\(token)","refreshToken":"r","expiresAt":\(millis)}}
-        """)!
+    private func cred(_ secs: Double, _ t: String) -> Credential {
+        Credential(jsonString: #"{"claudeAiOauth":{"accessToken":"\#(t)","refreshToken":"r","expiresAt":\#((Date.now.timeIntervalSince1970 + secs) * 1000)}}"#)!
     }
-
-    func test_readOnly_expiredCached_freshKeychain_fetchesWithoutRefresh() async {
-        var refreshCalled = false
-        var fetchedToken: String?
-        let coord = UsageRefreshCoordinator(
-            profileID: UUID(),
-            readOnly: true,
-            credentialProvider: { self.cred(expiresSecsFromNow: 60, token: "old") },
-            keychainReader: { self.cred(expiresSecsFromNow: 3600, token: "fresh") },
-            usageFetcher: { c in fetchedToken = c.accessToken; return UsageData.empty },
-            refresher: { _ in refreshCalled = true; throw ClaudeAPIError.invalidResponse }
-        )
-        await coord.refreshForTest()
-        XCTAssertFalse(refreshCalled, "read-only coordinator must never refresh")
-        XCTAssertEqual(fetchedToken, "fresh")
+    private func make(cached: Credential?, keychain: @escaping () -> Credential?,
+                      fetch: @escaping (Credential) async throws -> UsageData,
+                      refresh: @escaping (Credential) async throws -> Credential) -> UsageRefreshCoordinator {
+        UsageRefreshCoordinator(profileID: UUID(), readOnly: true,
+            credentialProvider: { cached }, keychainReader: keychain,
+            onCredentialCached: { _ in }, onAutoStart: nil,
+            usageFetcher: fetch, refresher: refresh)
     }
-
-    func test_readOnly_bothExpired_showsStaleNoRefresh() async {
-        var refreshCalled = false
-        var fetchCalled = false
-        let coord = UsageRefreshCoordinator(
-            profileID: UUID(),
-            readOnly: true,
-            credentialProvider: { self.cred(expiresSecsFromNow: 60, token: "old") },
-            keychainReader: { self.cred(expiresSecsFromNow: 60, token: "alsoOld") },
-            usageFetcher: { _ in fetchCalled = true; return UsageData.empty },
-            refresher: { _ in refreshCalled = true; throw ClaudeAPIError.invalidResponse }
-        )
-        await coord.refreshForTest()
-        XCTAssertFalse(refreshCalled)
-        XCTAssertFalse(fetchCalled)
-        XCTAssertTrue(coord.isStale)
+    func test_expiredCached_freshKeychain_fetchesNoRefresh() async {
+        var refreshed = false; var token: String?
+        let c = make(cached: cred(60, "old"), keychain: { self.cred(3600, "fresh") },
+            fetch: { token = $0.accessToken; return .empty },
+            refresh: { _ in refreshed = true; throw ClaudeAPIError.invalidResponse })
+        await c.refreshForTest()
+        XCTAssertFalse(refreshed); XCTAssertEqual(token, "fresh")
+    }
+    func test_bothExpired_staleNoRefreshNoFetch() async {
+        var refreshed = false; var fetched = false
+        let c = make(cached: cred(60, "old"), keychain: { self.cred(60, "old2") },
+            fetch: { _ in fetched = true; return .empty },
+            refresh: { _ in refreshed = true; throw ClaudeAPIError.invalidResponse })
+        await c.refreshForTest()
+        XCTAssertFalse(refreshed); XCTAssertFalse(fetched); XCTAssertTrue(c.isStale)
+    }
+    func test_401_rereadsKeychainOnce_noRefresh() async {
+        var refreshed = false; var reads = 0; var calls = 0
+        let c = make(cached: cred(3600, "cachedValid"), keychain: { reads += 1; return self.cred(3600, "fromKeychain") },
+            fetch: { _ in calls += 1; if calls == 1 { throw ClaudeAPIError.httpError(401) }; return .empty },
+            refresh: { _ in refreshed = true; throw ClaudeAPIError.invalidResponse })
+        await c.refreshForTest()
+        XCTAssertFalse(refreshed)         // never refresh on 401 in readOnly
+        XCTAssertEqual(reads, 1)          // re-read keychain exactly once
+        XCTAssertEqual(calls, 2)          // retried fetch with keychain token
     }
 }
-```
 
-You will need a tiny test helper on `UsageData`:
-```swift
-// in the test file or a test support file
 extension UsageData {
     static var empty: UsageData {
-        // Build a minimal valid instance; mirror the real initializer.
-        // If UsageData has no memberwise init, decode from a minimal JSON fixture instead.
-        return try! JSONDecoder().decode(UsageData.self, from: Data("""
-        {"five_hour":{"utilization":0},"seven_day":{"utilization":0}}
-        """.utf8))
+        try! JSONDecoder().decode(UsageData.self, from: Data(#"{"five_hour":{"utilization":0},"seven_day":{"utilization":0}}"#.utf8))
     }
 }
 ```
-> If this fixture does not match `UsageData`'s shape, open `Climeter/UsageData.swift`, read the `Codable` keys, and adjust the JSON to the real schema. Do not invent fields.
+> If `UsageData.empty` fails to decode, open `Climeter/UsageData.swift`, read the real
+> `CodingKeys`, and adjust the JSON to the actual schema. Do not invent fields.
 
-- [ ] **Step 2: Run, verify fails** (new initializer/`refreshForTest`/`isStale` unknown).
+- [ ] **Step 2:** Run → fails.
+- [ ] **Step 3: Implement.** Add stored properties and a designated initializer; keep the existing initializer as a convenience that delegates with `readOnly:false`.
 
-- [ ] **Step 3: Implement** — extend `UsageRefreshCoordinator`:
-  - Add stored properties: `let readOnly: Bool`, `let keychainReader: (() -> Credential?)?`, `let usageFetcher: (Credential) async throws -> UsageData`, `let refresher: ((Credential) async throws -> Credential)?`, and `@Published var isStale: Bool = false`.
-  - Add a designated initializer carrying these (keep the old one delegating to it with `readOnly: false`, `usageFetcher: ClaudeAPIService.fetchUsage`, `refresher: ClaudeAPIService.refreshToken`, `keychainReader: nil`).
-  - Add the read-only path:
+New stored properties:
 ```swift
-    /// Test seam: run one read-only cycle synchronously.
-    @MainActor
-    func refreshForTest() async { await runReadOnlyCycle() }
+    let readOnly: Bool
+    private let keychainReader: (() -> Credential?)?
+    private let onCredentialCached: ((Credential) -> Void)?
+    private let usageFetcher: (Credential) async throws -> UsageData
+    private let refresher: (Credential) async throws -> Credential
+    @Published var isStale: Bool = false
+```
+Designated initializer (preserve `onAutoStart`; drop the dead `syncCLICredential`):
+```swift
+    init(profileID: UUID,
+         readOnly: Bool,
+         credentialProvider: @escaping () -> Credential?,
+         keychainReader: (() -> Credential?)? = nil,
+         onCredentialRefreshed: ((Credential) -> Void)? = nil,
+         onCredentialCached: ((Credential) -> Void)? = nil,
+         onAutoStart: ((Credential) -> Void)? = nil,
+         usageFetcher: @escaping (Credential) async throws -> UsageData = ClaudeAPIService.fetchUsage,
+         refresher: @escaping (Credential) async throws -> Credential = ClaudeAPIService.refreshToken) {
+        self.profileID = profileID
+        self.readOnly = readOnly
+        self.credentialProvider = credentialProvider
+        self.keychainReader = keychainReader
+        self.onCredentialRefreshed = onCredentialRefreshed
+        self.onCredentialCached = onCredentialCached
+        self.onAutoStart = onAutoStart
+        self.usageFetcher = usageFetcher
+        self.refresher = refresher
+    }
+```
+> Note `ClaudeAPIService.fetchUsage`/`refreshToken` are static `async throws` funcs whose
+> signatures match the closure types, so they can be used as default values directly.
+
+At the top of `refresh()`:
+```swift
+        if readOnly { activeTask = Task { @MainActor in await self.runReadOnlyCycle() }; return }
+```
+Read-only engine (uses `usageFetcher`; never `refresher`):
+```swift
+    func refreshForTest() async { await runReadOnlyCycle() }   // test seam
 
     @MainActor
     private func runReadOnlyCycle() async {
         let cached = credentialProvider()
         var action = CLICredentialPolicy.action(cached: cached, keychain: nil, now: Date.now)
         if action == .rereadKeychain {
-            let kc = keychainReader?()
-            action = CLICredentialPolicy.action(cached: cached, keychain: kc, now: Date.now)
+            action = CLICredentialPolicy.action(cached: cached, keychain: keychainReader?(), now: Date.now)
         }
         switch action {
-        case .fetchUsage(let c):
-            await fetchAndPublish(c, cache: nil)
-        case .fetchUsageAndCache(let c):
-            await fetchAndPublish(c, cache: c)
-        case .rereadKeychain:
-            // keychain unavailable (e.g. denied / locked) -> stale
-            isStale = true
-        case .showStale:
-            isStale = true
+        case .fetchUsage(let c):          await fetchReadOnly(c, fromKeychain: false)
+        case .fetchUsageAndCache(let c):  onCredentialCached?(c); await fetchReadOnly(c, fromKeychain: true)
+        case .rereadKeychain, .showStale: isStale = true
         }
     }
 
     @MainActor
-    private func fetchAndPublish(_ credential: Credential, cache: Credential?) async {
-        if let cache { onCredentialCached?(cache) }
+    private func fetchReadOnly(_ credential: Credential, fromKeychain: Bool) async {
         do {
             let data = try await usageFetcher(credential)
-            usageData = data
-            errorMessage = nil
-            lastSuccessAt = Date()
-            isStale = false
-            checkAutoStart(credential: credential, usage: data)
+            publishSuccess(data, credential: credential, fromKeychain: fromKeychain)
+        } catch ClaudeAPIError.httpError(401) {
+            // Spec: on 401, re-read Keychain ONCE; retry if token changed; never refresh.
+            guard let kc = keychainReader?(), kc != credential, !kc.isExpired else { isStale = true; return }
+            onCredentialCached?(kc)
+            if let data = try? await usageFetcher(kc) {
+                publishSuccess(data, credential: kc, fromKeychain: true)
+            } else { isStale = true }
         } catch {
-            // 401 -> force a keychain reread next cycle by leaving cache stale;
-            // never refresh in read-only mode.
             isStale = true
             if usageData == nil { errorMessage = Self.describeError(error, context: "fetch") }
         }
     }
-```
-  - In `refresh()` (the timer entry point), branch at the top: `if readOnly { activeTask = Task { await self.runReadOnlyCycle() }; return }` before the existing self-owned logic.
-  - Add `onCredentialCached: ((Credential) -> Void)?` (replaces the CC-writing `onCredentialRefreshed` for read-only profiles — it only updates the in-memory cache).
-  - Remove the `syncCLICredential` parameter and its dead use in `recoverCredential` (it was always nil).
 
-- [ ] **Step 4:** Defer running until end of Task 6 (shared compile unit).
-
-- [ ] **Step 5: Commit (WIP)**
-```bash
-git add Climeter/UsageRefreshCoordinator.swift ClimeterTests/UsageRefreshCoordinatorReadOnlyTests.swift
-git commit -m "feat: read-only mode in UsageRefreshCoordinator (WIP)"
+    @MainActor
+    private func publishSuccess(_ data: UsageData, credential: Credential, fromKeychain: Bool) {
+        usageData = data; errorMessage = nil; lastSuccessAt = Date(); isStale = false
+        // Auto-start only with a FRESH keychain token (spec §8), never a cached one.
+        if fromKeychain { checkAutoStart(credential: credential, usage: data) }
+        stepDownBackoff()
+    }
 ```
+Remove `recoverCredential`'s `syncCLICredential?()` branch (A2, dead) and the
+`syncCLICredential` parameter.
+
+- [ ] **Step 4:** Run → pass (the existing convenience initializer keeps `ProfileManager` compiling because we kept `onCredentialRefreshed`; the old call site passes `readOnly:false` once updated in Task 6 — until then, add `readOnly:false` to the existing init by giving the OLD initializer signature a default? No: update the single call site now). **Update `ProfileManager.setupCoordinator` minimally here** only to add `readOnly: false` so it compiles; full rewrite is Task 6.
+- [ ] **Step 5: Commit** `feat: read-only mode + 401 re-read in UsageRefreshCoordinator`
 
 ---
 
-## Task 6: `ProfileManager` — remove all 5 mutation sites; wire read-only
+## Task 6: `ProfileManager` — remove A–E, gate P1–P3, R1–R2, migration
 
-**Files:**
-- Modify: `Climeter/ProfileManager.swift`, `Climeter/ProfileStore.swift`
-- Test: `ClimeterTests/ProfileManagerMigrationTests.swift` (extend)
+**Files:** `Climeter/ProfileManager.swift`, `Climeter/ProfileStore.swift`; extend `ClimeterTests/ProfileManagerMigrationTests.swift`
 
-- [ ] **Step 1: Site B — `identifyAndSyncAccount` must not refresh.** In `ProfileManager.swift:216-222`, delete the expired-refresh block:
+- [ ] **Step 1: ProfileStore — metadata + authenticated marker.** Add to `ProfileStore`:
 ```swift
-        // Refresh expired token before identifying account
-        if credential.isExpired { ... ClaudeAPIService.refreshToken ... }
-```
-Replace with: if `credential.isExpired`, attempt `fetchProfile` anyway; on failure just return (identification retries on the next scheduled keychain read). No refresh.
+    private static let accountMetaKey = "accountMeta"          // [uuid:[field:val]]
+    private static let authenticatedKey = "authenticatedProfiles" // [uuidString]
 
-- [ ] **Step 2: Site C — read-only coordinators never write CC store.** In `setupCoordinator` (`:471-495`), construct the coordinator with the new initializer. Determine read-only from the profile:
+    static func saveAccountMetadata(_ cred: Credential, for id: UUID) {
+        var dict = defaults.dictionary(forKey: accountMetaKey) as? [String: [String: String]] ?? [:]
+        var e = dict[id.uuidString] ?? [:]
+        if let v = cred.accountUUID { e["uuid"] = v }
+        if let v = cred.subscriptionType { e["subscriptionType"] = v }
+        if let v = cred.rateLimitTier { e["rateLimitTier"] = v }
+        dict[id.uuidString] = e; defaults.set(dict, forKey: accountMetaKey)
+        markAuthenticated(id)
+    }
+    static func accountUUID(for id: UUID) -> String? {
+        (defaults.dictionary(forKey: accountMetaKey) as? [String: [String: String]])?[id.uuidString]?["uuid"]
+    }
+    static func markAuthenticated(_ id: UUID) {
+        var s = Set(defaults.stringArray(forKey: authenticatedKey) ?? [])
+        s.insert(id.uuidString); defaults.set(Array(s), forKey: authenticatedKey)
+    }
+    static func clearAuthenticated(_ id: UUID) {
+        var s = Set(defaults.stringArray(forKey: authenticatedKey) ?? [])
+        s.remove(id.uuidString); defaults.set(Array(s), forKey: authenticatedKey)
+    }
+    static func authenticatedMarkers() -> Set<UUID> {
+        Set((defaults.stringArray(forKey: authenticatedKey) ?? []).compactMap(UUID.init))
+    }
+```
+
+- [ ] **Step 2: Helper to persist a cliSynced credential safely (metadata only).** Add a private method in `ProfileManager`:
 ```swift
-let source = profiles.first { $0.id == profileID }?.credentialSource ?? .cliSynced
-let readOnly = (source == .cliSynced)
+    /// cliSynced: keep token in memory only; persist metadata + authenticated marker.
+    /// selfOwned: persist the secret as before.
+    private func persistCredential(_ cred: Credential, for id: UUID) {
+        let source = profiles.first { $0.id == id }?.credentialSource ?? .cliSynced
+        cachedCredentials[id] = cred
+        if source == .selfOwned {
+            try? ProfileStore.saveCredentialModel(cred, for: id)
+        } else {
+            ProfileStore.saveAccountMetadata(cred, for: id)
+        }
+    }
 ```
-For read-only, pass `readOnly: true`, `keychainReader: { ClaudeCodeSyncService.readCLICredential(interactive: false) }`, `onCredentialCached: { [weak self] c in self?.cachedCredentials[profileID] = c }`, and **no** `onCredentialRefreshed` write to `ClaudeCodeSyncService`. For `selfOwned`, keep the existing refresh+persist closure (it writes only to Climeter's own store via `ProfileStore`, never to `ClaudeCodeSyncService`).
+Now replace **every** `try? ProfileStore.saveCredentialModel(...)` for CLI credentials with `persistCredential(...)`:
+  - **P1** `saveAndActivate:288` → `persistCredential(credential, for: profileID)` (drop the direct `cachedCredentials[...] =` + `saveCredentialModel`).
+  - **P2** `identifyAndSyncAccount:260-261` (UUID-resolution loop) → `persistCredential(updated, for: profile.id)`.
+  - **P3** `backfillAccountUUIDs:322-323` → `persistCredential(updated, for: profile.id)`.
 
-- [ ] **Step 3: Site D — stop writing CC store on activate.** Rewrite `activateForCLI` (`:565-571`) to not call `ClaudeCodeSyncService.writeCLICredential`:
+- [ ] **Step 3: B — no refresh in identifyAndSyncAccount.** Delete `:216-222` (the `isExpired`→`refreshToken` block). If the token is expired, proceed to `fetchProfile` anyway; on failure, return (next scheduled keychain read retries). No refresh.
+
+- [ ] **Step 4: Cold-launch — `refreshAuthenticatedIDs` honors markers.** Replace `:121-134` so a profile counts as authenticated if it has a persisted secret (selfOwned) OR an authenticated marker (cliSynced):
+```swift
+    private func refreshAuthenticatedIDs() {
+        var cache: [UUID: Credential] = [:]
+        for p in profiles {
+            if let c = ProfileStore.loadCredentialModel(for: p.id) { cache[p.id] = c }
+            else if let existing = cachedCredentials[p.id] { cache[p.id] = existing }
+        }
+        cachedCredentials = cache
+        authenticatedProfileIDs = Set(cache.keys).union(ProfileStore.authenticatedMarkers())
+    }
+```
+> Coordinators for cliSynced profiles start without an in-memory token; the first
+> `runReadOnlyCycle` reads the keychain and populates it.
+
+- [ ] **Step 5: C + setupCoordinator full rewrite (both branches).** Replace the coordinator construction in `setupCoordinator:471-495` with:
+```swift
+        let source = profiles.first { $0.id == profileID }?.credentialSource ?? .cliSynced
+        let coordinator: UsageRefreshCoordinator
+        if source == .cliSynced {
+            coordinator = UsageRefreshCoordinator(
+                profileID: profileID, readOnly: true,
+                credentialProvider: { [weak self] in self?.cachedCredentials[profileID] },
+                keychainReader: { ClaudeCodeSyncService.readCLICredential(interactive: false) },
+                onCredentialCached: { [weak self] c in self?.cachedCredentials[profileID] = c },
+                onAutoStart: { [weak self] credential in
+                    guard let self, self.claudeEnabled, self.cliActiveProfileID == profileID else { return }
+                    self.autoStartTask?.cancel()
+                    self.autoStartTask = Task { await ClaudeAPIService.startSession(credential: credential) }
+                })
+        } else {
+            coordinator = UsageRefreshCoordinator(
+                profileID: profileID, readOnly: false,
+                credentialProvider: { [weak self] in self?.cachedCredentials[profileID] },
+                onCredentialRefreshed: { [weak self] refreshed in            // selfOwned only
+                    guard self?.claudeEnabled == true else { return }
+                    self?.cachedCredentials[profileID] = refreshed
+                    try? ProfileStore.saveCredentialModel(refreshed, for: profileID)
+                },                                                            // NB: never writes CC store
+                onAutoStart: { [weak self] credential in
+                    guard let self, self.claudeEnabled, self.cliActiveProfileID == profileID else { return }
+                    self.autoStartTask?.cancel()
+                    self.autoStartTask = Task { await ClaudeAPIService.startSession(credential: credential) }
+                })
+        }
+```
+Keep the existing `$usageData/$errorMessage/$lastSuccessAt` sinks; add an `$isStale` sink (Task 8).
+
+- [ ] **Step 6: D1 + D2.** Rewrite `activateForCLI:565-571` (no CC write):
 ```swift
     func activateForCLI(profileID: UUID) {
-        // Climeter no longer switches Claude Code's active account (that was a
-        // write to CC's keychain). Switching is done in Claude Code itself.
+        // Climeter no longer switches Claude Code's active account (that wrote CC's
+        // keychain). Switch accounts inside Claude Code; Climeter follows via §5.
         cliActiveProfileID = profileID
         ProfileStore.saveCLIActiveProfileID(profileID)
     }
 ```
-Remove the `checkAutoSwitch` → `activateForCLI` call for Claude profiles: in `checkAutoSwitch` (`:529-550`), since it can no longer switch CC's account, gate it to `selfOwned` profiles only, or remove auto-switch for Claude. Implement: only consider candidates whose `credentialSource == .selfOwned`; if none, return. (Auto-switch across read-only CC accounts is no longer possible without writing CC's store — documented in spec Decision D.)
-
-- [ ] **Step 4: Site E — `migrateCredentialStorage` must not write CC file.** Delete the block at `:383-387`:
+In `checkAutoSwitch:540-544`, restrict candidates to `selfOwned` (auto-switch can no
+longer flip CC's account; effectively dead until a paste-key UI exists):
 ```swift
-        if toFileBased, let activeID = cliActiveProfileID, ... {
-            ClaudeCodeSyncService.writeCLICredential(credential, preferFile: true)
+        let candidate = profiles.first { p in
+            p.id != activeID && p.credentialSource == .selfOwned
+                && authenticatedProfileIDs.contains(p.id)
+                && (allUsageData[p.id]?.fiveHour.utilization ?? 100) < autoSwitchThreshold
         }
 ```
 
-- [ ] **Step 5: Remove the 30s keychain poll.** In `startCLIMonitoring` (`:164-172`), delete the `cliMonitorTimer` 30s repeat. Keep a single launch read. Trigger re-reads from: launch, `resumeAfterWake`, and the read-only coordinators' scheduled cycles. Replace `detectCLIAccountChange`'s `readCLICredential(preferFile:)` with `readCLICredential(interactive: false)` (and an interactive read on explicit launch where a prompt is acceptable).
+- [ ] **Step 7: E.** Delete the `:383-387` block that calls `writeCLICredential(..., preferFile:true)`.
 
-- [ ] **Step 6: In-memory-only CLI tokens.** In `saveAndActivate` (`:285-297`) and `identifyAndSyncAccount`, for `cliSynced` profiles do **not** call `ProfileStore.saveCredentialModel` with the secret; instead persist only metadata. Add to `ProfileStore`:
-```swift
-    // Non-secret metadata for cliSynced profiles (no tokens on disk).
-    static func saveAccountMetadata(uuid: String?, displayName: String?, for profileID: UUID) {
-        var dict = defaults.dictionary(forKey: "accountMeta") as? [String: [String: String]] ?? [:]
-        var entry = dict[profileID.uuidString] ?? [:]
-        if let uuid { entry["uuid"] = uuid }
-        if let displayName { entry["name"] = displayName }
-        dict[profileID.uuidString] = entry
-        defaults.set(dict, forKey: "accountMeta")
-    }
-```
-Keep `cachedCredentials` (in-memory) as the only home for cliSynced tokens. `selfOwned` profiles still persist via `ProfileStore.saveCredentialModel`.
+- [ ] **Step 8: R1 + R2.** In `startCLIMonitoring:164-172` delete the 30s `cliMonitorTimer` repeat (keep the one-shot launch check). In `detectCLIAccountChange:179-187` change the read to `ClaudeCodeSyncService.readCLICredential(interactive: false)` (drop `preferFile`). Account-switch matching already happens in `processCLICredential`/`identifyAndSyncAccount` by `accountUUID`; this stays intact so the read-only path attaches usage to the correct profile (reviewer: account-match). Also call `detectCLIAccountChange()` from `resumeAfterWake` (already present).
 
-- [ ] **Step 7: Migration on upgrade (extend the pure helper).** Add a new pure static used at launch:
+- [ ] **Step 9: Migration on upgrade (pure helper + caller).** Add:
 ```swift
     static func performReadOnlyMigration(
-        homeDirectory: URL,
-        renameStaleFile: (URL, URL) -> Void,
-        purgeCLISecret: (UUID) -> Void,
-        cliSyncedProfileIDs: [UUID]
-    ) {
-        let claudeDir = homeDirectory.appendingPathComponent(".claude")
-        let src = claudeDir.appendingPathComponent(".credentials.json")
-        let dst = claudeDir.appendingPathComponent(".credentials.json.climeter-bak")
-        renameStaleFile(src, dst) // implementation no-ops if src absent
-        for id in cliSyncedProfileIDs { purgeCLISecret(id) }
+        keychainExists: Bool,
+        fileURL: URL,
+        backupURL: URL,
+        fileExists: (URL) -> Bool,
+        moveFile: (URL, URL) -> Void,
+        profiles: [Profile],
+        hasStoredSecret: (UUID) -> Bool,
+        purgeSecret: (UUID) -> Void,
+        markAuthenticated: (UUID) -> Void
+    ) -> [Profile] {
+        // 1. Back up the stale CC file ONLY when the Keychain is the real store.
+        if keychainExists, fileExists(fileURL) { moveFile(fileURL, backupURL) }
+        // 2. All existing profiles are cliSynced (no paste-key UI exists yet).
+        var updated = profiles
+        for i in updated.indices {
+            updated[i].credentialSource = .cliSynced
+            // Preserve "authenticated" across the secret purge.
+            if hasStoredSecret(updated[i].id) { markAuthenticated(updated[i].id) }
+            purgeSecret(updated[i].id)   // remove any on-disk cliSynced token
+        }
+        return updated
     }
 ```
-Call it once from `init()` with real closures (FileManager move guarded by existence; `ProfileStore.deleteCredential` for purge). Set `credentialSource` for existing profiles: CLI-active → `cliSynced`; any with a stored session key but never CLI-active → `selfOwned`.
+Call once early in `init()` (before `setupAllCoordinators`), wiring real closures:
+`keychainExists: ClaudeCodeSyncService.keychainItemExists()`,
+`fileURL/backupURL` under `FileManager.default.homeDirectoryForCurrentUser/.claude`,
+`fileExists: { FileManager.default.fileExists(atPath: $0.path) }`,
+`moveFile: { try? FileManager.default.moveItem(at: $0, to: $1) }`,
+`hasStoredSecret: { ProfileStore.loadCredentialModel(for: $0) != nil }`,
+`purgeSecret: { try? ProfileStore.deleteCredential(for: $0) }`,
+`markAuthenticated: ProfileStore.markAuthenticated`. Save the returned profiles via
+`ProfileStore.saveProfiles` and guard with a one-time `UserDefaults` flag
+(`readOnlyMigrationDone`) so it runs once.
 
-- [ ] **Step 8: Update `ProfileManagerMigrationTests`** — add:
+- [ ] **Step 10: Tests** — extend `ProfileManagerMigrationTests`:
 ```swift
-    func test_readOnlyMigrationRenamesStaleFileAndPurgesSecrets() {
-        var renamed: (URL, URL)?
-        var purged: [UUID] = []
-        let id = UUID()
-        ProfileManager.performReadOnlyMigration(
-            homeDirectory: URL(fileURLWithPath: "/tmp/home"),
-            renameStaleFile: { s, d in renamed = (s, d) },
-            purgeCLISecret: { purged.append($0) },
-            cliSyncedProfileIDs: [id]
-        )
-        XCTAssertEqual(renamed?.0.lastPathComponent, ".credentials.json")
-        XCTAssertEqual(renamed?.1.lastPathComponent, ".credentials.json.climeter-bak")
-        XCTAssertEqual(purged, [id])
+    func test_migrationBacksUpFileOnlyWhenKeychainExists() {
+        var moved: (URL, URL)?
+        let p = [Profile(name: "A")]
+        _ = ProfileManager.performReadOnlyMigration(
+            keychainExists: true, fileURL: URL(fileURLWithPath: "/h/.claude/.credentials.json"),
+            backupURL: URL(fileURLWithPath: "/h/.claude/.credentials.json.climeter-bak"),
+            fileExists: { _ in true }, moveFile: { s, d in moved = (s, d) },
+            profiles: p, hasStoredSecret: { _ in false }, purgeSecret: { _ in }, markAuthenticated: { _ in })
+        XCTAssertEqual(moved?.1.lastPathComponent, ".credentials.json.climeter-bak")
+    }
+    func test_migrationLeavesFileWhenNoKeychain() {
+        var moved = false
+        _ = ProfileManager.performReadOnlyMigration(
+            keychainExists: false, fileURL: URL(fileURLWithPath: "/h/x"), backupURL: URL(fileURLWithPath: "/h/y"),
+            fileExists: { _ in true }, moveFile: { _, _ in moved = true },
+            profiles: [], hasStoredSecret: { _ in false }, purgeSecret: { _ in }, markAuthenticated: { _ in })
+        XCTAssertFalse(moved)
+    }
+    func test_migrationMarksAllCliSyncedAndPreservesAuth() {
+        let withSecret = Profile(name: "S"); let without = Profile(name: "N")
+        var marked: [UUID] = []; var purged: [UUID] = []
+        let out = ProfileManager.performReadOnlyMigration(
+            keychainExists: true, fileURL: URL(fileURLWithPath: "/h/x"), backupURL: URL(fileURLWithPath: "/h/y"),
+            fileExists: { _ in false }, moveFile: { _, _ in },
+            profiles: [withSecret, without],
+            hasStoredSecret: { $0 == withSecret.id }, purgeSecret: { purged.append($0) }, markAuthenticated: { marked.append($0) })
+        XCTAssertTrue(out.allSatisfy { $0.credentialSource == .cliSynced })
+        XCTAssertEqual(marked, [withSecret.id])
+        XCTAssertEqual(Set(purged), Set([withSecret.id, without.id]))
     }
 ```
 
-- [ ] **Step 9: Compile + run the WHOLE suite (Tasks 4–6 land together).**
+- [ ] **Step 11: Remove the deprecated shims** in `ClaudeCodeSyncService` (old `readCLICredential(preferFile:)`, `writeCLICredential*`, file helpers, `makeSharedAccess`, `cliCredentialFileExists`) now that `ProfileManager` no longer calls them.
 
-Run the full test command. Expected: `** TEST SUCCEEDED **`, including the Task 3/4/5 tests. Fix compile errors (remaining references to deleted methods) until green.
+- [ ] **Step 12: Compile + run the WHOLE suite.** Fix any residual references until `** TEST SUCCEEDED **`.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 13: Grep guard** — expect NO output except `selfOwned` branches:
 ```bash
-git add Climeter/ProfileManager.swift Climeter/ProfileStore.swift ClimeterTests/ProfileManagerMigrationTests.swift ClimeterTests/ClaudeCodeSyncServiceTests.swift ClimeterTests/UsageRefreshCoordinatorReadOnlyTests.swift
-git commit -m "feat: remove all Claude Code store mutations; read-only CLI sync"
+grep -rn "refreshToken(\|writeCLICredential\|readCLICredentialFromFile\|cliCredentialFileExists\|\.credentials.json\"" Climeter/ \
+  | grep -v "climeter-bak\|performReadOnlyMigration\|selfOwned"
 ```
+
+- [ ] **Step 14: Commit** `feat: read-only CLI sync — remove all CC store mutations + migration`
 
 ---
 
 ## Task 7: Settings & Popover UI
 
-**Files:** `Climeter/SettingsView.swift`, `Climeter/PopoverView.swift`
+**Files:** `Climeter/SettingsView.swift`, `Climeter/PopoverView.swift`, `Climeter/ProfileManager.swift`, maybe delete `ClimeterTests/ProfileStoreStorageTests.swift`
 
-- [ ] **Step 1: Remove the file-storage toggle's CLI meaning.** In `SettingsView.swift:27-46`, delete the "Use file-based storage" `Section("Credential Storage")` block (Climeter now always reads CC's keychain read-only; the toggle only ever affected the buggy path). Update the Claude section text (`:54`, `:59`) to remove the "File-based via Claude Code" wording — replace `:54` Text with `"macOS Keychain via Claude Code (read-only)"`.
-
-- [ ] **Step 2: Remove the Activate control for Claude.** In `SettingsView.swift:142` and `PopoverView.swift:76`, remove the buttons that call `profileManager.activateForCLI(...)` for Claude profiles (switching is done in Claude Code now). Leave profile display/rename/delete intact.
-
-- [ ] **Step 3: Remove `fileBasedStorage` published + toggle plumbing** if now unused: delete the `@Published var fileBasedStorage` (`ProfileManager.swift:50-55`) and its `migrateCredentialStorage(toFileBased:)` instance method only if no remaining references (grep first). Keep `FileCredentialStore` for `selfOwned` storage. (If `selfOwned` profiles still need a storage choice, leave `ProfileStore.loadFileBasedStorage` but stop surfacing it as a CC-related toggle.)
-
-```bash
-grep -rn "fileBasedStorage" Climeter/   # must be empty (or only selfOwned-scoped) before deleting
-```
-
-- [ ] **Step 4: Build the app target** (UI has no unit tests here):
-```bash
-xcodebuild build -project Climeter.xcodeproj -scheme Climeter -destination 'platform=macOS' 2>&1 | tail -15
-```
-Expected: `** BUILD SUCCEEDED **`.
-
-- [ ] **Step 5: Commit**
-```bash
-git add Climeter/SettingsView.swift Climeter/PopoverView.swift Climeter/ProfileManager.swift
-git commit -m "ui: remove file-storage toggle and Claude Activate button"
-```
+- [ ] **Step 1:** Delete the `Section("Credential Storage")` block (`SettingsView.swift:27-46`). Change `:54` text to `"macOS Keychain via Claude Code (read-only)"`.
+- [ ] **Step 2:** Remove the Activate buttons calling `activateForCLI` for Claude profiles: `SettingsView.swift:142`, `PopoverView.swift:76`.
+- [ ] **Step 3:** Grep `grep -rn "fileBasedStorage" Climeter/`. If only the now-dead `@Published var fileBasedStorage` + `migrateCredentialStorage(toFileBased:)` remain, delete them (`ProfileManager.swift:50-55` and the instance method) and the static `migrateCredentialStorage(...)` helper if unused. Keep `FileCredentialStore` for `selfOwned` storage via `ProfileStore`.
+- [ ] **Step 4:** If `fileBasedStorage` is removed, also `git rm ClimeterTests/ProfileStoreStorageTests.swift` (it round-trips the removed key); otherwise leave it.
+- [ ] **Step 5:** Build → `** BUILD SUCCEEDED **`.
+- [ ] **Step 6: Commit** `ui: remove file-storage toggle and Claude Activate button`
 
 ---
 
 ## Task 8: Stale indicator
 
-**Files:** `Climeter/PopoverView.swift`, `Climeter/MenuBarIcon.swift`
+**Files:** `Climeter/ProfileManager.swift`, `Climeter/PopoverView.swift`, `Climeter/MenuBarIcon.swift`
 
-- [ ] **Step 1: Surface staleness.** The coordinator now publishes `isStale`. Expose it on `ProfileManager` (e.g. `@Published var allStale: [UUID: Bool]`, fed by a `coordinator.$isStale` sink alongside the existing sinks in `setupCoordinator:497-513`).
-
-- [ ] **Step 2: Popover.** In `PopoverView.swift`, where usage + "updated" time render, when `allStale[id] == true` OR `allLastSuccess[id]` is older than 10 minutes, show `"Updated \(relative) ago — waiting for Claude Code"` and a **Retry** button calling `profileManager.refresh()`.
-
-- [ ] **Step 3: Menu bar.** In `MenuBarIcon.swift`, when the CLI-active profile is stale, render the glyph dimmed (e.g., reduce opacity) so staleness is visible without opening the popover.
-
-- [ ] **Step 4: Build**
-```bash
-xcodebuild build -project Climeter.xcodeproj -scheme Climeter -destination 'platform=macOS' 2>&1 | tail -15
-```
-Expected: `** BUILD SUCCEEDED **`.
-
-- [ ] **Step 5: Commit**
-```bash
-git add Climeter/PopoverView.swift Climeter/MenuBarIcon.swift Climeter/ProfileManager.swift
-git commit -m "ui: stale indicator (menu bar dim + popover retry)"
-```
+- [ ] **Step 1:** Add `@Published var allStale: [UUID: Bool] = [:]`; in `setupCoordinator` add a sink: `coordinator.$isStale.receive(on: DispatchQueue.main).sink { [weak self] s in self?.allStale[profileID] = s }` (append to `cancellables[profileID]`).
+- [ ] **Step 2:** In `PopoverView.swift`, when `allStale[id] == true` OR `allLastSuccess[id]` older than 10 min, show `"Updated <relative> ago — waiting for Claude Code"` + a **Retry** button calling `profileManager.refresh()`.
+- [ ] **Step 3:** In `MenuBarIcon.swift`, dim the glyph (reduced opacity) when the CLI-active profile is stale.
+- [ ] **Step 4:** Build → `** BUILD SUCCEEDED **`.
+- [ ] **Step 5: Commit** `ui: stale indicator (menu bar dim + popover retry)`
 
 ---
 
-## Task 9: Full suite + grep guard
+## Task 9: Full suite + guard
 
-- [ ] **Step 1: Guard test — no Claude Code store mutation remains.** Create `ClimeterTests/NoCCMutationGuardTests.swift` is not feasible at runtime; instead add a source grep to the plan's verification:
-```bash
-grep -rn "writeCLICredential\|\.credentials.json\"" Climeter/ \
-  | grep -v "climeter-bak" \
-  | grep -v "performReadOnlyMigration"
-```
-Expected: **no output** (no remaining write paths or file-credential reads).
-
-- [ ] **Step 2: Run full suite**
-```bash
-xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
-  -destination 'platform=macOS' -only-testing:ClimeterTests 2>&1 | tail -30
-```
-Expected: `** TEST SUCCEEDED **`.
-
-- [ ] **Step 3: Commit any test-support tweaks**, then this task is done.
+- [ ] **Step 1:** Run the grep guard from Task 6 Step 13 → no unexpected output.
+- [ ] **Step 2:** Full test command → `** TEST SUCCEEDED **`.
+- [ ] **Step 3: Commit** any test-support tweaks.
 
 ---
 
-## Task 10: Manual verification (real behavior)
+## Task 10: Manual verification (real macOS behavior)
 
-Automated tests can't prove the macOS Keychain/login behavior. Do this on the dev machine:
-
-- [ ] **Step 1:** Build & run the app from this branch.
-- [ ] **Step 2:** Note the current keychain `mdat`:
+- [ ] **Step 1:** Build & run from this branch.
+- [ ] **Step 2:** `security find-generic-password -s "Claude Code-credentials" 2>&1 | grep mdat` (note value).
+- [ ] **Step 3:** Confirm backup + original removed (only if keychain existed):
 ```bash
-security find-generic-password -s "Claude Code-credentials" 2>&1 | grep mdat
+ls -la ~/.claude/.credentials.json.climeter-bak 2>/dev/null
+test ! -e ~/.claude/.credentials.json && echo "original removed: OK"
 ```
-- [ ] **Step 3:** Confirm the stale file got backed up:
-```bash
-ls -la ~/.claude/.credentials.json.climeter-bak 2>/dev/null && \
-  (test ! -e ~/.claude/.credentials.json && echo "original removed: OK")
-```
-- [ ] **Step 4:** `/login` once in Claude Code. Then leave both running ~10 min and confirm Climeter shows usage (grant "Always Allow" if prompted).
-- [ ] **Step 5:** After several hours of use, re-check keychain `mdat` and Climeter logs:
+- [ ] **Step 4:** `/login` once in Claude Code; grant "Always Allow" if prompted; leave both running ~10 min; confirm usage shows.
+- [ ] **Step 5:** After hours of use:
 ```bash
 grep -hE "refreshToken: POST|invalid_grant" ~/Library/Logs/Climeter/climeter.log | tail
 ```
-Expected: **no** `refreshToken: POST` from Climeter for the CLI profile, **no** `invalid_grant`, and Claude Code does **not** prompt for `/login` the next day.
-
+Expected: **no** `refreshToken: POST` for the CLI profile, **no** `invalid_grant`, and Claude Code does **not** force `/login` the next day.
 - [ ] **Step 6:** Open a PR (only when the user asks).
 
 ---
 
-## Self-Review (completed by author)
+## Self-Review (author)
 
-- **Spec coverage:** sites A–E → Tasks 4/5/6; CredentialSource → Task 1; in-memory tokens → Task 6.6; rare reads/backoff → Tasks 4/5; ignore file → Task 4; rename stale file → Task 6.7; toggle removal → Task 7; stale UX → Task 8; ACL probe → Task 4 (`interactive:`); tests 1–10 → Tasks 1/3/5/6/9. All spec sections mapped.
-- **Placeholder scan:** UsageData.empty fixture flagged with explicit instruction to match the real schema (read `UsageData.swift`); no other placeholders.
-- **Type consistency:** `CLIRefreshAction` cases, `readCLICredential(interactive:)`, `credentialSource`, `isExpired(now:)`, `onCredentialCached`, `performReadOnlyMigration` used consistently across tasks.
+- **All inventory IDs A1–E, P1–P3, R1–R2 → tasks:** A1/A2/401 → Task 5; B → 6.3; C → 6.5; D1/D2 → 6.6; E → 6.7; P1–P3 → 6.2; R1/R2 → 6.8. ✓
+- **Reviewer blockers:** missed P2/P3 persistence (6.2), account-match retained (6.8), 401 re-read (Task 5 test+impl), all-cliSynced migration (6.9), cold-launch marker (6.1/6.4), explicit initializer & call sites (Task 5 + 6.5), Equatable all fields (Task 2), auto-start provenance (Task 5 `fromKeychain`), file-rename keychain guard (6.9). ✓
+- **Compile integrity:** shims keep Tasks 4–5 green; Task 6 removes them (4.shims → 6.11). ✓
+- **Placeholders:** only the `UsageData.empty` fixture, explicitly flagged to verify against the real schema. ✓
+- **Type consistency:** `CLIRefreshAction`, `readCLICredential(interactive:)`, `keychainItemExists`, `credentialSource`, `persistCredential`, `performReadOnlyMigration`, `isExpired(now:)`, `onCredentialCached`, `allStale` used consistently. ✓

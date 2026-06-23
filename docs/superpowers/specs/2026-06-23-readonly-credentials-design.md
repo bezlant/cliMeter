@@ -246,16 +246,31 @@ file-read behavior.
 
 ## Migration / Cleanup (resolves Open Q4)
 
-- On macOS the file is never authoritative, so removing it cannot break Claude Code.
-  To stay safe and reversible, **rename** `~/.claude/.credentials.json` →
+- **Rename, with a guard.** Rename `~/.claude/.credentials.json` →
   `~/.claude/.credentials.json.climeter-bak` once on upgrade (don't hard-delete),
-  and log it. No "did Climeter author it" guard needed.
+  **only when the Keychain item `Claude Code-credentials` exists and is readable.**
+  A readable Keychain item proves the Keychain is the real store and the file is the
+  redundant stale copy. If the Keychain item is absent/unreadable (keychain-less,
+  headless, Linux, or a shared home where the file is the real store), **leave the
+  file untouched.** Always log the decision.
 - Purge any persisted `cliSynced` OAuth secrets from Climeter's own store; keep
-  metadata.
-- Set `credentialSource` for existing profiles: the CLI-active one → `cliSynced`;
-  others with a stored session key → `selfOwned`.
+  non-secret metadata, and record an "authenticated" marker so profiles survive a
+  cold launch before the first Keychain read (see Cold-Launch below).
+- **All existing profiles are classified `cliSynced` on upgrade.** There is currently
+  no UI to add a `selfOwned` (paste-your-own-key) profile, so every existing profile
+  mirrors Claude Code and must be read-only. Marking any existing profile `selfOwned`
+  would re-enable refresh on it — the exact bug. `selfOwned` is reserved for a future
+  paste-key UI.
 - One-time user remedy for the currently-broken machine: this migration + `/login`
   once in Claude Code.
+
+### Cold-Launch bootstrap
+
+`refreshAuthenticatedIDs` currently decides a profile is authenticated by loading its
+persisted secret. Since `cliSynced` secrets are no longer persisted, persist a
+non-secret **authenticated marker** (alongside account metadata) so `cliSynced`
+profiles still appear authenticated and get coordinators on a cold launch, before the
+first Keychain read populates the in-memory token.
 
 ## Resolved Open Questions
 
