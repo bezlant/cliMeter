@@ -69,9 +69,11 @@ struct PopoverView: View {
                                     usageData: profileManager.allUsageData[profile.id],
                                     errorMessage: profileManager.allErrors[profile.id],
                                     lastSuccessAt: profileManager.allLastSuccess[profile.id],
+                                    isStale: profileManager.allStale[profile.id] == true,
                                     isCLIActive: profileManager.cliActiveProfileID == profile.id,
                                     showProfileName: profileManager.authenticatedProfiles.count > 1,
-                                    currentTime: currentTime
+                                    currentTime: currentTime,
+                                    onRetry: { profileManager.refresh() }
                                 )
                                 .padding(10)
                                 .background(
@@ -204,39 +206,81 @@ struct HeaderButton: View {
 
 // MARK: - Profile Card
 
-struct ProfileCard: View {
-    let profile: Profile
-    let usageData: UsageData?
-    let errorMessage: String?
-    let lastSuccessAt: Date?
-    let isCLIActive: Bool
-    let showProfileName: Bool
-    let currentTime: Date
+enum ClaudeStalePresentation {
+    /// Claude Code may keep running with read-only credentials while API usage
+    /// refreshes lag; after this, make the stale state explicit in the UI.
+    static let staleThreshold: TimeInterval = 10 * 60
 
-    /// 3× base poll interval. Past this, the data on screen likely no longer
-    /// reflects reality (e.g. when the API is rate-limiting us).
-    private static let staleThreshold: TimeInterval = UsageRefreshCoordinator.baseInterval * 3
-
-    private var staleAge: TimeInterval? {
-        guard usageData != nil, let last = lastSuccessAt else { return nil }
-        let age = currentTime.timeIntervalSince(last)
-        return age > Self.staleThreshold ? age : nil
+    static func isWaiting(
+        credentialSource: CredentialSource,
+        isStale: Bool,
+        lastSuccessAt: Date?,
+        currentTime: Date
+    ) -> Bool {
+        guard credentialSource == .cliSynced else { return false }
+        if isStale { return true }
+        guard let lastSuccessAt else { return false }
+        return currentTime.timeIntervalSince(lastSuccessAt) > staleThreshold
     }
 
-    private static func formatStaleAge(_ age: TimeInterval) -> String {
+    static func waitingMessage(
+        credentialSource: CredentialSource,
+        isStale: Bool,
+        lastSuccessAt: Date?,
+        currentTime: Date
+    ) -> String? {
+        guard isWaiting(
+            credentialSource: credentialSource,
+            isStale: isStale,
+            lastSuccessAt: lastSuccessAt,
+            currentTime: currentTime
+        ) else { return nil }
+        guard let lastSuccessAt else { return "Waiting for Claude Code" }
+        let age = currentTime.timeIntervalSince(lastSuccessAt)
+        return "Updated \(formatStaleAge(age)) — waiting for Claude Code"
+    }
+
+    static func formatStaleAge(_ age: TimeInterval) -> String {
         let minutes = Int(age) / 60
         if minutes < 60 { return "\(minutes)m ago" }
         let hours = minutes / 60
         let remMin = minutes % 60
         return remMin > 0 ? "\(hours)h \(remMin)m ago" : "\(hours)h ago"
     }
+}
+
+struct ProfileCard: View {
+    let profile: Profile
+    let usageData: UsageData?
+    let errorMessage: String?
+    let lastSuccessAt: Date?
+    let isStale: Bool
+    let isCLIActive: Bool
+    let showProfileName: Bool
+    let currentTime: Date
+    let onRetry: () -> Void
+
+    private var staleAge: TimeInterval? {
+        guard usageData != nil, let last = lastSuccessAt else { return nil }
+        let age = currentTime.timeIntervalSince(last)
+        return age > ClaudeStalePresentation.staleThreshold ? age : nil
+    }
+
+    private var staleWaitingText: String? {
+        ClaudeStalePresentation.waitingMessage(
+            credentialSource: profile.credentialSource,
+            isStale: isStale,
+            lastSuccessAt: lastSuccessAt,
+            currentTime: currentTime
+        )
+    }
 
     static func formatStaleAgeForProvider(_ age: TimeInterval) -> String {
-        formatStaleAge(age)
+        ClaudeStalePresentation.formatStaleAge(age)
     }
 
     private func staleLabel(_ age: TimeInterval) -> some View {
-        Text("stale \(Self.formatStaleAge(age))")
+        Text("stale \(ClaudeStalePresentation.formatStaleAge(age))")
             .font(.system(size: 9))
             .foregroundColor(.secondary.opacity(0.7))
     }
@@ -285,13 +329,28 @@ struct ProfileCard: View {
                         .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity)
-            } else {
+            } else if staleWaitingText == nil {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
                     Text("Loading...")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
+                }
+            }
+
+            if let staleWaitingText {
+                HStack(spacing: 6) {
+                    Text(staleWaitingText)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("Retry", action: onRetry)
+                        .font(.system(size: 10, weight: .medium))
+                        .controlSize(.small)
+                        .buttonStyle(.borderless)
                 }
             }
         }

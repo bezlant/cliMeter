@@ -4,6 +4,8 @@ import SwiftUI
 struct ClimeterApp: App {
     @StateObject private var profileManager = ProfileManager()
     @StateObject private var updateChecker = UpdateChecker()
+    @State private var menuBarTime = Date.now
+    private let menuBarTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
 
     init() {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.bezlant.climeter"
@@ -20,12 +22,25 @@ struct ClimeterApp: App {
         MenuBarExtra {
             PopoverView(profileManager: profileManager, updateChecker: updateChecker)
         } label: {
-            if let usageData = profileManager.cliActiveUsageData {
-                let utilization = usageData.fiveHour.utilization
-                let isPeak = profileManager.peakHoursEnabled && PeakHoursService.isPeakNow()
-                Image(nsImage: MenuBarIcon.progressBar(utilization: utilization, isPeak: isPeak))
-            } else {
-                Text("—")
+            Group {
+                if let usageData = profileManager.cliActiveUsageData {
+                    let utilization = usageData.fiveHour.utilization
+                    let isPeak = profileManager.peakHoursEnabled && PeakHoursService.isPeakNow()
+                    let activeProfile = profileManager.cliActiveProfile
+                    let activeProfileID = activeProfile?.id
+                    let isStale = ClaudeStalePresentation.isWaiting(
+                        credentialSource: activeProfile?.credentialSource ?? .cliSynced,
+                        isStale: activeProfileID.map { profileManager.allStale[$0] == true } ?? false,
+                        lastSuccessAt: activeProfileID.flatMap { profileManager.allLastSuccess[$0] },
+                        currentTime: menuBarTime
+                    )
+                    Image(nsImage: MenuBarIcon.progressBar(utilization: utilization, isPeak: isPeak, isStale: isStale))
+                } else {
+                    Text("—")
+                }
+            }
+            .onReceive(menuBarTimer) { time in
+                menuBarTime = time
             }
         }
         .menuBarExtraStyle(.window)

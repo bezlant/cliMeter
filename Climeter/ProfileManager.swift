@@ -7,6 +7,7 @@ class ProfileManager: ObservableObject {
     @Published var allUsageData: [UUID: UsageData] = [:]
     @Published var allErrors: [UUID: String] = [:]
     @Published var allLastSuccess: [UUID: Date] = [:]
+    @Published var allStale: [UUID: Bool] = [:]
     @Published var cliActiveProfileID: UUID?
     @Published private(set) var authenticatedProfileIDs: Set<UUID> = []
     @Published var codexUsageData: UsageData?
@@ -534,7 +535,12 @@ class ProfileManager: ObservableObject {
             .sink { [weak self] date in
                 self?.allLastSuccess[profileID] = date
             }
-        cancellables[profileID] = [usageSink, errorSink, lastSuccessSink]
+        let staleSink = coordinator.$isStale
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isStale in
+                self?.allStale[profileID] = isStale
+            }
+        cancellables[profileID] = [usageSink, errorSink, lastSuccessSink, staleSink]
         coordinators[profileID] = coordinator
         coordinator.startPolling()
     }
@@ -546,6 +552,7 @@ class ProfileManager: ObservableObject {
         allUsageData.removeValue(forKey: profileID)
         allErrors.removeValue(forKey: profileID)
         allLastSuccess.removeValue(forKey: profileID)
+        allStale.removeValue(forKey: profileID)
     }
 
     // MARK: - Auto-Switch
