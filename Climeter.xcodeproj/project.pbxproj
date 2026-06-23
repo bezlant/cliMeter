@@ -42,6 +42,7 @@
 		1A300007000000000000007 /* ProfileStoreStorageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A300008000000000000008 /* ProfileStoreStorageTests.swift */; };
 		1A300009000000000000009 /* ProfileManagerMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A300010000000000000010 /* ProfileManagerMigrationTests.swift */; };
 		1A300011000000000000011 /* ProfileCodableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A300012000000000000012 /* ProfileCodableTests.swift */; };
+		1A500001000000000000001 /* CredentialExpiryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A500002000000000000002 /* CredentialExpiryTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -93,6 +94,7 @@
 		1A300008000000000000008 /* ProfileStoreStorageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileStoreStorageTests.swift; sourceTree = "<group>"; };
 		1A300010000000000000010 /* ProfileManagerMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileManagerMigrationTests.swift; sourceTree = "<group>"; };
 		1A300012000000000000012 /* ProfileCodableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileCodableTests.swift; sourceTree = "<group>"; };
+		1A500002000000000000002 /* CredentialExpiryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExpiryTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -177,6 +179,7 @@
 				1A300008000000000000008 /* ProfileStoreStorageTests.swift */,
 				1A300010000000000000010 /* ProfileManagerMigrationTests.swift */,
 				1A300012000000000000012 /* ProfileCodableTests.swift */,
+				1A500002000000000000002 /* CredentialExpiryTests.swift */,
 			);
 			path = ClimeterTests;
 			sourceTree = "<group>";
@@ -313,6 +316,7 @@
 				1A300007000000000000007 /* ProfileStoreStorageTests.swift in Sources */,
 				1A300009000000000000009 /* ProfileManagerMigrationTests.swift in Sources */,
 				1A300011000000000000011 /* ProfileCodableTests.swift in Sources */,
+				1A500001000000000000001 /* CredentialExpiryTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
