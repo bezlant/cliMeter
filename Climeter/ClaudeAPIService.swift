@@ -39,7 +39,7 @@ enum ClaudeAPIService {
         }
     }
 
-    static func refreshToken(_ credential: Credential) async throws -> Credential {
+    static func refreshSelfOwnedToken(_ credential: Credential) async throws -> Credential {
         let url = URL(string: "https://console.anthropic.com/v1/oauth/token")!
 
         var request = URLRequest(url: url)

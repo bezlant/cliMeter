@@ -8,9 +8,8 @@ struct Credential {
     var rateLimitTier: String?
     var accountUUID: String?
 
-    var isExpired: Bool {
-        expiresAt < Date.now.addingTimeInterval(5 * 60)
-    }
+    func isExpired(now: Date) -> Bool { expiresAt < now.addingTimeInterval(5 * 60) }
+    var isExpired: Bool { isExpired(now: Date.now) }
 
     init?(jsonString: String) {
         guard let data = jsonString.data(using: .utf8),
@@ -51,5 +50,13 @@ struct Credential {
             return "{}"
         }
         return string
+    }
+}
+
+extension Credential: Equatable {
+    static func == (l: Credential, r: Credential) -> Bool {
+        l.accessToken == r.accessToken && l.refreshToken == r.refreshToken &&
+        l.expiresAt == r.expiresAt && l.subscriptionType == r.subscriptionType &&
+        l.rateLimitTier == r.rateLimitTier && l.accountUUID == r.accountUUID
     }
 }

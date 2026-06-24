@@ -7,11 +7,14 @@ class ProfileManager: ObservableObject {
     @Published var allUsageData: [UUID: UsageData] = [:]
     @Published var allErrors: [UUID: String] = [:]
     @Published var allLastSuccess: [UUID: Date] = [:]
+    @Published var allStale: [UUID: Bool] = [:]
     @Published var cliActiveProfileID: UUID?
     @Published private(set) var authenticatedProfileIDs: Set<UUID> = []
     @Published var codexUsageData: UsageData?
     @Published var codexErrorMessage: String?
     @Published var codexLastSuccessAt: Date?
+    private static let readOnlyCredentialFileBackupDoneKey = "readOnlyMigrationDone"
+    private static let readOnlyProfileMigrationDoneKey = "readOnlyProfileMigrationDone"
     @Published var claudeEnabled: Bool = true {
         didSet {
             ProfileStore.saveClaudeEnabled(claudeEnabled)
@@ -47,13 +50,6 @@ class ProfileManager: ObservableObject {
             }
         }
     }
-    @Published var fileBasedStorage: Bool = ProfileStore.loadFileBasedStorage() {
-        didSet {
-            guard oldValue != fileBasedStorage else { return }
-            migrateCredentialStorage(toFileBased: fileBasedStorage)
-        }
-    }
-
     @Published var peakHoursEnabled: Bool = true {
         didSet { ProfileStore.savePeakHoursEnabled(peakHoursEnabled) }
     }
@@ -72,7 +68,6 @@ class ProfileManager: ObservableObject {
     private var lastAutoSwitchDate: Date?
     private let powerMonitor = PowerStateMonitor()
     private var hasResumedSinceLastSleep = false
-    private var cliMonitorTimer: Timer?
     private var cliIdentificationTask: Task<Void, Never>?
     private var autoStartTask: Task<Void, Never>?
     private var backfillTasks: [Task<Void, Never>] = []
@@ -98,6 +93,7 @@ class ProfileManager: ObservableObject {
 
     init() {
         loadProfiles()
+        performReadOnlyMigrationIfNeeded()
         refreshAuthenticatedIDs()
         loadCLIActiveProfileID()
         peakHoursEnabled = ProfileStore.loadPeakHoursEnabled()
@@ -119,18 +115,16 @@ class ProfileManager: ObservableObject {
     }
 
     private func refreshAuthenticatedIDs() {
-        var newCache: [UUID: Credential] = [:]
-        for profile in profiles {
-            if let credential = ProfileStore.loadCredentialModel(for: profile.id) {
-                newCache[profile.id] = credential
-            } else if let existing = cachedCredentials[profile.id] {
-                // Keychain may be locked (sleep/dark wake) — keep cached credential
-                Log.profiles.info("[\(profile.id)] keychain read failed, keeping cached credential")
-                newCache[profile.id] = existing
+        var cache: [UUID: Credential] = [:]
+        for p in profiles {
+            if let c = ProfileStore.loadCredentialModel(for: p.id) {
+                cache[p.id] = c
+            } else if let existing = cachedCredentials[p.id] {
+                cache[p.id] = existing
             }
         }
-        cachedCredentials = newCache
-        authenticatedProfileIDs = Set(newCache.keys)
+        cachedCredentials = cache
+        authenticatedProfileIDs = Set(cache.keys).union(ProfileStore.authenticatedMarkers())
     }
 
     func cachedCredential(for profileID: UUID) -> Credential? {
@@ -141,6 +135,45 @@ class ProfileManager: ObservableObject {
         cachedCredentials[profileID] = credential
     }
 
+    /// cliSynced: keep token in memory only; persist metadata + authenticated marker.
+    /// selfOwned: persist the secret as before.
+    private func persistCredential(_ cred: Credential, for id: UUID) {
+        let source = profiles.first { $0.id == id }?.credentialSource ?? .cliSynced
+        cachedCredentials[id] = cred
+        if Self.shouldPersistSecret(for: source) {
+            try? ProfileStore.saveCredentialModel(cred, for: id)
+        } else {
+            ProfileStore.saveAccountMetadata(cred, for: id)
+        }
+    }
+
+    static func shouldPersistSecret(for source: CredentialSource) -> Bool {
+        source == .selfOwned
+    }
+
+    private func readCLICredential(for profileID: UUID) -> Credential? {
+        guard let credential = ClaudeCodeSyncService.readCLICredential(interactive: false) else {
+            return nil
+        }
+
+        guard let expectedUUID = ProfileStore.accountUUID(for: profileID),
+              let credentialUUID = credential.accountUUID else {
+            if cliActiveProfileID == profileID {
+                processCLICredential(credential)
+            }
+            return nil
+        }
+
+        guard credentialUUID == expectedUUID else {
+            if cliActiveProfileID == profileID {
+                processCLICredential(credential)
+            }
+            return nil
+        }
+
+        return credential
+    }
+
     // MARK: - Initialization
 
     private func loadProfiles() {
@@ -149,6 +182,52 @@ class ProfileManager: ObservableObject {
             let defaultProfile = Profile(name: "Default")
             profiles = [defaultProfile]
             ProfileStore.saveProfiles(profiles)
+        }
+    }
+
+    private func performReadOnlyMigrationIfNeeded() {
+        let defaults = UserDefaults.standard
+        let legacyMigrationDone = defaults.bool(forKey: Self.readOnlyCredentialFileBackupDoneKey)
+
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let claudeDir = home.appendingPathComponent(".claude")
+        let credentialFileName = ".credentials" + ".json"
+        let fileURL = claudeDir.appendingPathComponent(credentialFileName)
+        let backupURL = claudeDir.appendingPathComponent("\(credentialFileName).climeter-bak")
+        let keychainExists = ClaudeCodeSyncService.keychainItemExists()
+
+        if !legacyMigrationDone && !defaults.bool(forKey: Self.readOnlyProfileMigrationDoneKey) {
+            profiles = Self.migrateProfilesToReadOnly(
+                profiles: profiles,
+                storedCredential: { ProfileStore.loadCredentialModel(for: $0) },
+                saveMetadata: { credential, profileID in ProfileStore.saveAccountMetadata(credential, for: profileID) },
+                purgeSecret: { ProfileStore.deleteCredentialFromAllStores(for: $0) },
+                markAuthenticated: { ProfileStore.markAuthenticated($0) }
+            )
+            ProfileStore.saveProfiles(profiles)
+            defaults.set(true, forKey: Self.readOnlyProfileMigrationDoneKey)
+        }
+
+        guard !legacyMigrationDone else { return }
+
+        Self.backupStaleCredentialFile(
+            keychainExists: keychainExists,
+            fileURL: fileURL,
+            backupURL: backupURL,
+            fileExists: { FileManager.default.fileExists(atPath: $0.path) },
+            moveFile: { source, destination in
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try? FileManager.default.removeItem(at: destination)
+                }
+                try? FileManager.default.moveItem(at: source, to: destination)
+            }
+        )
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            defaults.set(true, forKey: Self.readOnlyCredentialFileBackupDoneKey)
+        } else if !keychainExists {
+            Log.profiles.warning("readOnlyMigration: keychain unavailable; will retry stale file backup next launch")
+        } else {
+            Log.profiles.warning("readOnlyMigration: credential file backup failed; will retry next launch")
         }
     }
 
@@ -166,21 +245,15 @@ class ProfileManager: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
             self?.detectCLIAccountChange()
         }
-        cliMonitorTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.detectCLIAccountChange()
-        }
     }
 
     private func stopCLIMonitoring() {
-        cliMonitorTimer?.invalidate()
-        cliMonitorTimer = nil
     }
 
     private func detectCLIAccountChange() {
         guard claudeEnabled else { return }
-        let preferFile = fileBasedStorage
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let cliCredential = ClaudeCodeSyncService.readCLICredential(preferFile: preferFile)
+            let cliCredential = ClaudeCodeSyncService.readCLICredential(interactive: false)
             DispatchQueue.main.async {
                 self?.processCLICredential(cliCredential)
             }
@@ -213,22 +286,10 @@ class ProfileManager: ObservableObject {
         guard claudeEnabled, !Task.isCancelled else { return }
         var credential = cliCredential
 
-        // Refresh expired token before identifying account
-        if credential.isExpired {
-            Log.profiles.info("detectCLI: token expired, refreshing first...")
-            if let refreshed = try? await ClaudeAPIService.refreshToken(credential) {
-                credential = refreshed
-            }
-        }
-
         guard claudeEnabled, !Task.isCancelled else { return }
 
         guard let apiProfile = try? await ClaudeAPIService.fetchProfile(credential: credential) else {
             Log.profiles.warning("detectCLI: fetchProfile failed")
-            if !Task.isCancelled, !hasAnyAuthenticated {
-                let target = profiles.first { !authenticatedProfileIDs.contains($0.id) } ?? profiles[0]
-                saveAndActivate(credential: credential, profileID: target.id)
-            }
             return
         }
 
@@ -239,8 +300,8 @@ class ProfileManager: ObservableObject {
 
         // Match by accountUUID
         for profile in profiles {
-            if let stored = cachedCredentials[profile.id],
-               stored.accountUUID == apiProfile.uuid {
+            let accountUUID = cachedCredentials[profile.id]?.accountUUID ?? ProfileStore.accountUUID(for: profile.id)
+            if accountUUID == apiProfile.uuid {
                 Log.profiles.info("detectCLI: matched existing profile '\(profile.name)'")
                 saveAndActivate(credential: credential, profileID: profile.id)
                 return
@@ -257,8 +318,7 @@ class ProfileManager: ObservableObject {
             if let storedProfile {
                 var updated = stored
                 updated.accountUUID = storedProfile.uuid
-                cachedCredentials[profile.id] = updated
-                try? ProfileStore.saveCredentialModel(updated, for: profile.id)
+                persistCredential(updated, for: profile.id)
                 if storedProfile.uuid == apiProfile.uuid {
                     Log.profiles.info("detectCLI: resolved match → '\(profile.name)'")
                     saveAndActivate(credential: credential, profileID: profile.id)
@@ -284,8 +344,7 @@ class ProfileManager: ObservableObject {
 
     private func saveAndActivate(credential: Credential, profileID: UUID) {
         guard claudeEnabled else { return }
-        cachedCredentials[profileID] = credential
-        try? ProfileStore.saveCredentialModel(credential, for: profileID)
+        persistCredential(credential, for: profileID)
         refreshAuthenticatedIDs()
         if cliActiveProfileID != profileID {
             cliActiveProfileID = profileID
@@ -319,8 +378,7 @@ class ProfileManager: ObservableObject {
                     guard self.claudeEnabled, !Task.isCancelled else { return }
                     var updated = self.cachedCredentials[profile.id] ?? credential
                     updated.accountUUID = apiProfile.uuid
-                    self.cachedCredentials[profile.id] = updated
-                    try? ProfileStore.saveCredentialModel(updated, for: profile.id)
+                    self.persistCredential(updated, for: profile.id)
                     Log.profiles.info("backfill: set accountUUID for '\(profile.name)' → \(apiProfile.uuid)")
                 }
             }
@@ -328,63 +386,33 @@ class ProfileManager: ObservableObject {
         }
     }
 
-    static func migrateCredentialStorage(
-        toFileBased: Bool,
-        cachedCredentials: [UUID: Credential],
-        saveStorageMode: (Bool) -> Void,
-        saveCredential: (Credential, UUID) throws -> Void,
-        deleteKeychainCredential: (UUID) throws -> Void,
-        deleteFileCredentials: () -> Void,
-        logSaveFailure: (UUID, Error) -> Void
-    ) {
-        saveStorageMode(toFileBased)
-
-        var migratedProfileIDs = Set<UUID>()
-        for (profileID, credential) in cachedCredentials {
-            do {
-                try saveCredential(credential, profileID)
-                migratedProfileIDs.insert(profileID)
-            } catch {
-                logSaveFailure(profileID, error)
+    static func migrateProfilesToReadOnly(
+        profiles: [Profile],
+        storedCredential: (UUID) -> Credential?,
+        saveMetadata: (Credential, UUID) -> Void,
+        purgeSecret: (UUID) -> Void,
+        markAuthenticated: (UUID) -> Void
+    ) -> [Profile] {
+        var updated = profiles
+        for i in updated.indices {
+            updated[i].credentialSource = .cliSynced
+            if let credential = storedCredential(updated[i].id) {
+                saveMetadata(credential, updated[i].id)
+                markAuthenticated(updated[i].id)
             }
+            purgeSecret(updated[i].id)
         }
-
-        if toFileBased {
-            // Skip keychain deletion — accessing SecItemDelete triggers
-            // the same macOS password prompts we're trying to avoid.
-            // Stale keychain entries are harmless in file-based mode.
-        } else if !cachedCredentials.isEmpty,
-                  migratedProfileIDs.count == cachedCredentials.count {
-            deleteFileCredentials()
-        }
+        return updated
     }
 
-    private func migrateCredentialStorage(toFileBased: Bool) {
-        Log.profiles.info("migrateCredentialStorage: toFileBased=\(toFileBased), \(cachedCredentials.count) credentials")
-
-        Self.migrateCredentialStorage(
-            toFileBased: toFileBased,
-            cachedCredentials: cachedCredentials,
-            saveStorageMode: { ProfileStore.saveFileBasedStorage($0) },
-            saveCredential: { credential, profileID in
-                try ProfileStore.saveCredentialModel(credential, for: profileID)
-            },
-            deleteKeychainCredential: { profileID in
-                try KeychainService.delete(for: profileID)
-            },
-            deleteFileCredentials: {
-                FileCredentialStore.deleteAll()
-            },
-            logSaveFailure: { profileID, error in
-                Log.profiles.error("migrateCredentialStorage: failed to save \(profileID): \(error)")
-            }
-        )
-
-        if toFileBased, let activeID = cliActiveProfileID,
-           let credential = cachedCredentials[activeID],
-           !ClaudeCodeSyncService.cliCredentialFileExists() {
-            ClaudeCodeSyncService.writeCLICredential(credential, preferFile: true)
-        }
+    static func backupStaleCredentialFile(
+        keychainExists: Bool,
+        fileURL: URL,
+        backupURL: URL,
+        fileExists: (URL) -> Bool,
+        moveFile: (URL, URL) -> Void
+    ) {
+        if keychainExists, fileExists(fileURL) { moveFile(fileURL, backupURL) }
     }
 
     private func setupPowerMonitor() {
@@ -468,31 +496,48 @@ class ProfileManager: ObservableObject {
         guard coordinators[profileID] == nil else { return }
         Log.profiles.info("setupCoordinator for \(profileID)")
 
-        let coordinator = UsageRefreshCoordinator(
-            profileID: profileID,
-            credentialProvider: { [weak self] in
-                self?.cachedCredentials[profileID]
-            },
-            onCredentialRefreshed: { [weak self] refreshed in
-                guard self?.claudeEnabled == true else { return }
-                Log.profiles.info("[\(profileID)] credential refreshed, saving to app keychain...")
-                self?.cachedCredentials[profileID] = refreshed
-                try? ProfileStore.saveCredentialModel(refreshed, for: profileID)
-                if self?.cliActiveProfileID == profileID {
-                    let preferFile = self?.fileBasedStorage ?? false
-                    Log.profiles.info("[\(profileID)] is CLI-active, writing back to CLI credential store...")
-                    ClaudeCodeSyncService.writeCLICredential(refreshed, preferFile: preferFile)
+        let source = profiles.first { $0.id == profileID }?.credentialSource ?? .cliSynced
+        let coordinator: UsageRefreshCoordinator
+        if Self.usesReadOnlyCoordinator(for: source) {
+            // The reader may detect a Claude Code account switch while reading.
+            // It must remain read-only toward Claude Code, but can update Climeter profile metadata.
+            coordinator = UsageRefreshCoordinator(
+                profileID: profileID,
+                readOnly: true,
+                credentialProvider: { [weak self] in self?.cachedCredentials[profileID] },
+                keychainReader: { [weak self] in self?.readCLICredential(for: profileID) },
+                onCredentialCached: { [weak self] credential in
+                    self?.cachedCredentials[profileID] = credential
+                },
+                onAutoStart: { [weak self] credential in
+                    guard let self, self.claudeEnabled,
+                          self.cliActiveProfileID == profileID else { return }
+                    self.autoStartTask?.cancel()
+                    self.autoStartTask = Task {
+                        await ClaudeAPIService.startSession(credential: credential)
+                    }
                 }
-            },
-            onAutoStart: { [weak self] credential in
-                guard let self, self.claudeEnabled,
-                      self.cliActiveProfileID == profileID else { return }
-                self.autoStartTask?.cancel()
-                self.autoStartTask = Task {
-                    await ClaudeAPIService.startSession(credential: credential)
+            )
+        } else {
+            coordinator = UsageRefreshCoordinator(
+                profileID: profileID,
+                readOnly: false,
+                credentialProvider: { [weak self] in self?.cachedCredentials[profileID] },
+                onCredentialRefreshed: { [weak self] refreshed in
+                    guard self?.claudeEnabled == true else { return }
+                    self?.cachedCredentials[profileID] = refreshed
+                    try? ProfileStore.saveCredentialModel(refreshed, for: profileID)
+                },
+                onAutoStart: { [weak self] credential in
+                    guard let self, self.claudeEnabled,
+                          self.cliActiveProfileID == profileID else { return }
+                    self.autoStartTask?.cancel()
+                    self.autoStartTask = Task {
+                        await ClaudeAPIService.startSession(credential: credential)
+                    }
                 }
-            }
-        )
+            )
+        }
 
         let usageSink = coordinator.$usageData
             .receive(on: DispatchQueue.main)
@@ -510,9 +555,18 @@ class ProfileManager: ObservableObject {
             .sink { [weak self] date in
                 self?.allLastSuccess[profileID] = date
             }
-        cancellables[profileID] = [usageSink, errorSink, lastSuccessSink]
+        let staleSink = coordinator.$isStale
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isStale in
+                self?.allStale[profileID] = isStale
+            }
+        cancellables[profileID] = [usageSink, errorSink, lastSuccessSink, staleSink]
         coordinators[profileID] = coordinator
         coordinator.startPolling()
+    }
+
+    static func usesReadOnlyCoordinator(for source: CredentialSource) -> Bool {
+        source == .cliSynced
     }
 
     private func teardownCoordinator(for profileID: UUID) {
@@ -522,6 +576,7 @@ class ProfileManager: ObservableObject {
         allUsageData.removeValue(forKey: profileID)
         allErrors.removeValue(forKey: profileID)
         allLastSuccess.removeValue(forKey: profileID)
+        allStale.removeValue(forKey: profileID)
     }
 
     // MARK: - Auto-Switch
@@ -539,6 +594,7 @@ class ProfileManager: ObservableObject {
         // Find first authenticated profile under threshold
         let candidate = profiles.first { profile in
             profile.id != activeID
+                && profile.credentialSource == .selfOwned
                 && authenticatedProfileIDs.contains(profile.id)
                 && (allUsageData[profile.id]?.fiveHour.utilization ?? 100) < autoSwitchThreshold
         }
@@ -554,7 +610,7 @@ class ProfileManager: ObservableObject {
     func refresh() {
         if claudeEnabled {
             for coordinator in coordinators.values {
-                coordinator.refresh()
+                coordinator.refresh(forceKeychainReread: true)
             }
         }
         if codexEnabled {
@@ -563,9 +619,8 @@ class ProfileManager: ObservableObject {
     }
 
     func activateForCLI(profileID: UUID) {
-        guard let credential = cachedCredentials[profileID] else { return }
-        Log.profiles.info("activateForCLI: switching to \(profileID), writing to CLI credential store...")
-        ClaudeCodeSyncService.writeCLICredential(credential, preferFile: fileBasedStorage)
+        // Climeter no longer switches Claude Code's active account. Switch
+        // accounts inside Claude Code; Climeter follows via CLI monitoring.
         cliActiveProfileID = profileID
         ProfileStore.saveCLIActiveProfileID(profileID)
     }
@@ -601,13 +656,17 @@ class ProfileManager: ObservableObject {
 
         profiles.remove(at: index)
         ProfileStore.saveProfiles(profiles)
-        try? ProfileStore.deleteCredential(for: id)
+        ProfileStore.deleteCredentialFromAllStores(for: id)
+        ProfileStore.clearAccountMetadata(id)
+        ProfileStore.clearAuthenticated(id)
         refreshAuthenticatedIDs()
     }
 
     func removeCredential(for profileID: UUID) {
         teardownCoordinator(for: profileID)
-        try? ProfileStore.deleteCredential(for: profileID)
+        ProfileStore.deleteCredentialFromAllStores(for: profileID)
+        ProfileStore.clearAccountMetadata(profileID)
+        ProfileStore.clearAuthenticated(profileID)
         refreshAuthenticatedIDs()
     }
 
