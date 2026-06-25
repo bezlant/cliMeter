@@ -19,6 +19,16 @@ final class ProfileManagerMigrationTests: XCTestCase {
         XCTAssertFalse(moved)
     }
 
+    func test_profileMigrationStillRunsWhenLegacyFileBackupMigrationAlreadyRan() {
+        let plan = ProfileManager.readOnlyMigrationPlan(
+            legacyCredentialFileBackupDone: true,
+            profileMigrationDone: false
+        )
+
+        XCTAssertTrue(plan.runProfileMigration)
+        XCTAssertFalse(plan.runCredentialFileBackup)
+    }
+
     func test_migrationMarksAllCliSyncedPreservesAuthAndSavesMetadataBeforePurge() {
         let withSecret = Profile(name: "S")
         let without = Profile(name: "N")
@@ -36,6 +46,27 @@ final class ProfileManagerMigrationTests: XCTestCase {
         XCTAssertEqual(metadata.map { $0.0 }, [withSecret.id])
         XCTAssertEqual(metadata.map { $0.1 }, ["acct-1"])
         XCTAssertEqual(Set(purged), Set([withSecret.id, without.id]))
+    }
+
+    func test_authenticationStateDoesNotLoadPersistedSecretsForCliSyncedProfiles() {
+        let cliSynced = Profile(name: "CLI", credentialSource: .cliSynced)
+        let selfOwned = Profile(name: "Manual", credentialSource: .selfOwned)
+        var loaded: [UUID] = []
+
+        let state = ProfileManager.computeAuthenticationState(
+            profiles: [cliSynced, selfOwned],
+            existingCredentials: [:],
+            storedCredential: { id in
+                loaded.append(id)
+                return Self.credential(accessToken: "stored", accountUUID: "acct-\(id.uuidString)")
+            },
+            authenticatedMarkers: [cliSynced.id]
+        )
+
+        XCTAssertEqual(loaded, [selfOwned.id])
+        XCTAssertNil(state.credentials[cliSynced.id])
+        XCTAssertNotNil(state.credentials[selfOwned.id])
+        XCTAssertEqual(state.authenticatedProfileIDs, Set([cliSynced.id, selfOwned.id]))
     }
 
     func test_profileMigrationCanRunWithoutBackingUpFile() {

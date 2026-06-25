@@ -115,16 +115,14 @@ class ProfileManager: ObservableObject {
     }
 
     private func refreshAuthenticatedIDs() {
-        var cache: [UUID: Credential] = [:]
-        for p in profiles {
-            if let c = ProfileStore.loadCredentialModel(for: p.id) {
-                cache[p.id] = c
-            } else if let existing = cachedCredentials[p.id] {
-                cache[p.id] = existing
-            }
-        }
-        cachedCredentials = cache
-        authenticatedProfileIDs = Set(cache.keys).union(ProfileStore.authenticatedMarkers())
+        let state = Self.computeAuthenticationState(
+            profiles: profiles,
+            existingCredentials: cachedCredentials,
+            storedCredential: { ProfileStore.loadCredentialModel(for: $0) },
+            authenticatedMarkers: ProfileStore.authenticatedMarkers()
+        )
+        cachedCredentials = state.credentials
+        authenticatedProfileIDs = state.authenticatedProfileIDs
     }
 
     func cachedCredential(for profileID: UUID) -> Credential? {
@@ -151,27 +149,61 @@ class ProfileManager: ObservableObject {
         source == .selfOwned
     }
 
+    struct AuthenticationState {
+        let credentials: [UUID: Credential]
+        let authenticatedProfileIDs: Set<UUID>
+    }
+
+    static func computeAuthenticationState(
+        profiles: [Profile],
+        existingCredentials: [UUID: Credential],
+        storedCredential: (UUID) -> Credential?,
+        authenticatedMarkers: Set<UUID>
+    ) -> AuthenticationState {
+        var credentials: [UUID: Credential] = [:]
+        for profile in profiles {
+            if let existing = existingCredentials[profile.id] {
+                credentials[profile.id] = existing
+            } else if shouldPersistSecret(for: profile.credentialSource),
+                      let stored = storedCredential(profile.id) {
+                credentials[profile.id] = stored
+            }
+        }
+        return AuthenticationState(
+            credentials: credentials,
+            authenticatedProfileIDs: Set(credentials.keys).union(authenticatedMarkers)
+        )
+    }
+
     private func readCLICredential(for profileID: UUID) -> Credential? {
         guard let credential = ClaudeCodeSyncService.readCLICredential(interactive: false) else {
             return nil
         }
 
-        guard let expectedUUID = ProfileStore.accountUUID(for: profileID),
-              let credentialUUID = credential.accountUUID else {
-            if cliActiveProfileID == profileID {
-                processCLICredential(credential)
-            }
-            return nil
-        }
-
-        guard credentialUUID == expectedUUID else {
-            if cliActiveProfileID == profileID {
-                processCLICredential(credential)
-            }
+        let expectedUUID = ProfileStore.accountUUID(for: profileID)
+        if !Self.canUseCLICredential(
+            credential,
+            for: profileID,
+            expectedAccountUUID: expectedUUID,
+            activeProfileID: cliActiveProfileID
+        ) {
+            if cliActiveProfileID == profileID { processCLICredential(credential) }
             return nil
         }
 
         return credential
+    }
+
+    static func canUseCLICredential(
+        _ credential: Credential,
+        for profileID: UUID,
+        expectedAccountUUID: String?,
+        activeProfileID: UUID?
+    ) -> Bool {
+        if let expectedAccountUUID, let credentialUUID = credential.accountUUID {
+            return credentialUUID == expectedAccountUUID
+        }
+        return activeProfileID == profileID
     }
 
     // MARK: - Initialization
@@ -188,6 +220,11 @@ class ProfileManager: ObservableObject {
     private func performReadOnlyMigrationIfNeeded() {
         let defaults = UserDefaults.standard
         let legacyMigrationDone = defaults.bool(forKey: Self.readOnlyCredentialFileBackupDoneKey)
+        let profileMigrationDone = defaults.bool(forKey: Self.readOnlyProfileMigrationDoneKey)
+        let migrationPlan = Self.readOnlyMigrationPlan(
+            legacyCredentialFileBackupDone: legacyMigrationDone,
+            profileMigrationDone: profileMigrationDone
+        )
 
         let home = FileManager.default.homeDirectoryForCurrentUser
         let claudeDir = home.appendingPathComponent(".claude")
@@ -196,7 +233,7 @@ class ProfileManager: ObservableObject {
         let backupURL = claudeDir.appendingPathComponent("\(credentialFileName).climeter-bak")
         let keychainExists = ClaudeCodeSyncService.keychainItemExists()
 
-        if !legacyMigrationDone && !defaults.bool(forKey: Self.readOnlyProfileMigrationDoneKey) {
+        if migrationPlan.runProfileMigration {
             profiles = Self.migrateProfilesToReadOnly(
                 profiles: profiles,
                 storedCredential: { ProfileStore.loadCredentialModel(for: $0) },
@@ -208,7 +245,7 @@ class ProfileManager: ObservableObject {
             defaults.set(true, forKey: Self.readOnlyProfileMigrationDoneKey)
         }
 
-        guard !legacyMigrationDone else { return }
+        guard migrationPlan.runCredentialFileBackup else { return }
 
         Self.backupStaleCredentialFile(
             keychainExists: keychainExists,
@@ -413,6 +450,21 @@ class ProfileManager: ObservableObject {
         moveFile: (URL, URL) -> Void
     ) {
         if keychainExists, fileExists(fileURL) { moveFile(fileURL, backupURL) }
+    }
+
+    struct ReadOnlyMigrationPlan {
+        let runProfileMigration: Bool
+        let runCredentialFileBackup: Bool
+    }
+
+    static func readOnlyMigrationPlan(
+        legacyCredentialFileBackupDone: Bool,
+        profileMigrationDone: Bool
+    ) -> ReadOnlyMigrationPlan {
+        ReadOnlyMigrationPlan(
+            runProfileMigration: !profileMigrationDone,
+            runCredentialFileBackup: !legacyCredentialFileBackupDone
+        )
     }
 
     private func setupPowerMonitor() {

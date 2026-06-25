@@ -14,6 +14,18 @@ final class ClimeterTests: XCTestCase {
         XCTAssertTrue(ProfileManager.shouldPersistSecret(for: .selfOwned))
     }
 
+    func test_activeProfileCanUseCLIKeychainCredentialBeforeAccountUUIDBackfill() {
+        let profileID = UUID()
+        let credential = Credential(jsonString: #"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":9000000000000}}"#)!
+
+        XCTAssertTrue(ProfileManager.canUseCLICredential(
+            credential,
+            for: profileID,
+            expectedAccountUUID: "acct-1",
+            activeProfileID: profileID
+        ))
+    }
+
     func test_profileCardStaleWaitingMessageUsesCoordinatorFlagOrTenMinuteAge() {
         let now = Date(timeIntervalSince1970: 1_000)
 
