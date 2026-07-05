@@ -48,6 +48,32 @@ final class ProfileManagerMigrationTests: XCTestCase {
         XCTAssertEqual(Set(purged), Set([withSecret.id, without.id]))
     }
 
+    func test_readOnlyMigrationCredentialFallsBackToLegacyFileStore() {
+        let id = UUID()
+        let credential = ProfileManager.readOnlyMigrationCredential(
+            for: id,
+            keychainCredential: { _ in nil },
+            fileCredentialRaw: { requestedID in
+                requestedID == id ? Self.credential(accessToken: "file", accountUUID: "acct-file").toJSONString() : nil
+            }
+        )
+
+        XCTAssertEqual(credential?.accessToken, "file")
+        XCTAssertEqual(credential?.accountUUID, "acct-file")
+    }
+
+    func test_readOnlyMigrationCredentialPrefersKeychainOverLegacyFileStore() {
+        let id = UUID()
+        let credential = ProfileManager.readOnlyMigrationCredential(
+            for: id,
+            keychainCredential: { _ in Self.credential(accessToken: "keychain", accountUUID: "acct-keychain") },
+            fileCredentialRaw: { _ in Self.credential(accessToken: "file", accountUUID: "acct-file").toJSONString() }
+        )
+
+        XCTAssertEqual(credential?.accessToken, "keychain")
+        XCTAssertEqual(credential?.accountUUID, "acct-keychain")
+    }
+
     func test_authenticationStateDoesNotLoadPersistedSecretsForCliSyncedProfiles() {
         let cliSynced = Profile(name: "CLI", credentialSource: .cliSynced)
         let selfOwned = Profile(name: "Manual", credentialSource: .selfOwned)

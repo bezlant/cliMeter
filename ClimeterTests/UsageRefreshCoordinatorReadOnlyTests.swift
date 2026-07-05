@@ -26,6 +26,17 @@ final class UsageRefreshCoordinatorReadOnlyTests: XCTestCase {
                                 refresher: refresh)
     }
 
+    private func makeSelfOwned(cached: Credential?,
+                               fetch: @escaping (Credential) async throws -> UsageData,
+                               refresh: @escaping (Credential) async throws -> Credential = { $0 }) -> UsageRefreshCoordinator {
+        UsageRefreshCoordinator(profileID: UUID(),
+                                readOnly: false,
+                                credentialProvider: { cached },
+                                onAutoStart: nil,
+                                usageFetcher: fetch,
+                                refresher: refresh)
+    }
+
     func test_expiredCached_freshKeychain_fetchesNoRefresh() async {
         var refreshed = false
         var token: String?
@@ -181,6 +192,71 @@ final class UsageRefreshCoordinatorReadOnlyTests: XCTestCase {
         await Task.yield()
         XCTAssertFalse(refreshed)
         XCTAssertFalse(c.isLoading)
+    }
+
+    func test_stopPollingDuringReadOnlyFetchClearsLoadingSoRetryCanFetch() async {
+        var calls = 0
+        var resumeFirstFetch: CheckedContinuation<UsageData, Error>?
+        let c = make(cached: cred(3600, "cachedValid"),
+                     keychain: { nil },
+                     fetch: { _ in
+                         calls += 1
+                         if calls == 1 {
+                             return try await withCheckedThrowingContinuation { continuation in
+                                 resumeFirstFetch = continuation
+                             }
+                         }
+                         return .empty
+                     },
+                     refresh: { _ in throw ClaudeAPIError.invalidResponse })
+
+        c.refresh()
+        await Task.yield()
+        XCTAssertEqual(calls, 1)
+        XCTAssertTrue(c.isLoading)
+
+        c.stopPolling()
+        XCTAssertFalse(c.isLoading)
+
+        c.refresh()
+        await Task.yield()
+        XCTAssertEqual(calls, 2)
+        resumeFirstFetch?.resume(throwing: CancellationError())
+    }
+
+    func test_stoppedSelfOwnedTaskCannotClearNewerRefreshLoadingState() async {
+        var continuations: [CheckedContinuation<UsageData, Error>] = []
+        var calls = 0
+        let c = makeSelfOwned(cached: cred(3600, "cachedValid"),
+                              fetch: { _ in
+                                  calls += 1
+                                  return try await withCheckedThrowingContinuation { continuation in
+                                      continuations.append(continuation)
+                                  }
+                              })
+
+        c.refresh()
+        await Task.yield()
+        XCTAssertEqual(calls, 1)
+        XCTAssertTrue(c.isLoading)
+
+        c.stopPolling()
+        XCTAssertFalse(c.isLoading)
+
+        c.refresh()
+        await Task.yield()
+        XCTAssertEqual(calls, 2)
+        XCTAssertTrue(c.isLoading)
+
+        continuations[0].resume(returning: .empty)
+        await Task.yield()
+        XCTAssertTrue(c.isLoading)
+        XCTAssertNil(c.usageData)
+
+        continuations[1].resume(returning: .empty)
+        await Task.yield()
+        XCTAssertFalse(c.isLoading)
+        XCTAssertNotNil(c.usageData)
     }
 
     func test_401Retry429PreservesStaleAndRateLimitError() async {

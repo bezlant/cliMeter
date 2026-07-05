@@ -236,7 +236,7 @@ class ProfileManager: ObservableObject {
         if migrationPlan.runProfileMigration {
             profiles = Self.migrateProfilesToReadOnly(
                 profiles: profiles,
-                storedCredential: { ProfileStore.loadCredentialModel(for: $0) },
+                storedCredential: { Self.readOnlyMigrationCredential(for: $0) },
                 saveMetadata: { credential, profileID in ProfileStore.saveAccountMetadata(credential, for: profileID) },
                 purgeSecret: { ProfileStore.deleteCredentialFromAllStores(for: $0) },
                 markAuthenticated: { ProfileStore.markAuthenticated($0) }
@@ -440,6 +440,16 @@ class ProfileManager: ObservableObject {
             purgeSecret(updated[i].id)
         }
         return updated
+    }
+
+    static func readOnlyMigrationCredential(
+        for profileID: UUID,
+        keychainCredential: (UUID) -> Credential? = { ProfileStore.loadCredentialModel(for: $0) },
+        fileCredentialRaw: (UUID) -> String? = { FileCredentialStore.read(for: $0) }
+    ) -> Credential? {
+        if let credential = keychainCredential(profileID) { return credential }
+        guard let raw = fileCredentialRaw(profileID) else { return nil }
+        return Credential(jsonString: raw)
     }
 
     static func backupStaleCredentialFile(

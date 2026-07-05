@@ -18,6 +18,7 @@ class UsageRefreshCoordinator: ObservableObject {
     private let refresher: (Credential) async throws -> Credential
     private var timer: Timer?
     private var activeTask: Task<Void, Never>?
+    private var activeTaskGeneration: UInt64 = 0
     static let baseInterval: TimeInterval = 180.0
     static let staleKeychainRereadInterval: TimeInterval = 900.0
     private var currentInterval: TimeInterval = UsageRefreshCoordinator.baseInterval
@@ -73,8 +74,10 @@ class UsageRefreshCoordinator: ObservableObject {
     func stopPolling() {
         timer?.invalidate()
         timer = nil
+        activeTaskGeneration += 1
         activeTask?.cancel()
         activeTask = nil
+        isLoading = false
     }
 
     func refresh(forceKeychainReread: Bool = false) {
@@ -85,8 +88,10 @@ class UsageRefreshCoordinator: ObservableObject {
 
         if readOnly {
             isLoading = true
+            activeTaskGeneration += 1
+            let generation = activeTaskGeneration
             activeTask = Task { @MainActor in
-                defer { self.isLoading = false }
+                defer { self.finishActiveTask(generation: generation) }
                 await self.runReadOnlyCycle(forceKeychainReread: forceKeychainReread)
             }
             return
@@ -103,9 +108,11 @@ class UsageRefreshCoordinator: ObservableObject {
         Log.coordinator.info("[\(self.profileID)] token expires in \(Int(expiresIn))s, isExpired=\(credential.isExpired)")
 
         isLoading = true
+        activeTaskGeneration += 1
+        let generation = activeTaskGeneration
 
         activeTask = Task { @MainActor in
-            defer { self.isLoading = false }
+            defer { self.finishActiveTask(generation: generation) }
 
             if credential.isExpired {
                 Log.coordinator.info("[\(self.profileID)] token expired, starting recovery...")
@@ -158,6 +165,13 @@ class UsageRefreshCoordinator: ObservableObject {
                 }
             }
         }
+    }
+
+    @MainActor
+    private func finishActiveTask(generation: UInt64) {
+        guard activeTaskGeneration == generation else { return }
+        isLoading = false
+        activeTask = nil
     }
 
     func refreshForTest(forceKeychainReread: Bool = false) async {

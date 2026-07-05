@@ -9,7 +9,6 @@ enum ProfileStore {
     private static let claudeEnabledKey = "claudeEnabled"
     private static let codexEnabledKey = "codexEnabled"
     private static let peakHoursEnabledKey = "peakHoursEnabled"
-    private static let fileBasedStorageKey = "fileBasedCredentialStorage"
     private static let accountMetaKey = "accountMeta"
     private static let authenticatedKey = "authenticatedProfiles"
     private static let defaults = UserDefaults.standard
@@ -113,39 +112,17 @@ enum ProfileStore {
         defaults.set(enabled, forKey: codexEnabledKey)
     }
 
-    // MARK: - Storage Mode
-
-    static func loadFileBasedStorage() -> Bool {
-        defaults.bool(forKey: fileBasedStorageKey)
-    }
-
-    static func saveFileBasedStorage(_ enabled: Bool) {
-        defaults.set(enabled, forKey: fileBasedStorageKey)
-    }
-
-    // Raw string credential operations — routes to Keychain or file store
+    // Raw string credential operations for Climeter-owned credentials.
     static func saveCredential(_ sessionKey: String, for profileID: UUID) throws {
-        if loadFileBasedStorage() {
-            try FileCredentialStore.save(sessionKey, for: profileID)
-        } else {
-            try KeychainService.save(sessionKey, for: profileID)
-        }
+        try KeychainService.save(sessionKey, for: profileID)
     }
 
     static func loadCredential(for profileID: UUID) throws -> String? {
-        if loadFileBasedStorage() {
-            return FileCredentialStore.read(for: profileID)
-        } else {
-            return try KeychainService.read(for: profileID)
-        }
+        try KeychainService.read(for: profileID)
     }
 
     static func deleteCredential(for profileID: UUID) throws {
-        if loadFileBasedStorage() {
-            try FileCredentialStore.delete(for: profileID)
-        } else {
-            try KeychainService.delete(for: profileID)
-        }
+        try KeychainService.delete(for: profileID)
     }
 
     static func deleteCredentialFromAllStores(for profileID: UUID) {
