@@ -24,6 +24,9 @@ enum ClaudeAPIService {
         Log.api.info("fetchUsage: HTTP \(httpResponse.statusCode)")
         guard httpResponse.statusCode == 200 else {
             logErrorResponse(httpResponse, data: data, label: "fetchUsage")
+            if httpResponse.statusCode == 429 {
+                throw ClaudeAPIError.rateLimited(retryAfter: retryAfterDelay(from: httpResponse))
+            }
             throw ClaudeAPIError.httpError(httpResponse.statusCode)
         }
 
@@ -136,6 +139,12 @@ enum ClaudeAPIService {
         Log.api.warning("\(label): HTTP \(response.statusCode) Retry-After=\(retryAfter) body=\(bodySnippet)")
     }
 
+    private static func retryAfterDelay(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let raw = response.value(forHTTPHeaderField: "Retry-After") else { return nil }
+        guard let seconds = TimeInterval(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        return max(0, seconds)
+    }
+
     static func startSession(credential: Credential) async {
         let url = URL(string: "https://api.anthropic.com/v1/messages")!
 
@@ -161,6 +170,7 @@ enum ClaudeAPIError: Error {
     case invalidCredential
     case invalidResponse
     case httpError(Int)
+    case rateLimited(retryAfter: TimeInterval?)
     case decodingError(Error)
     case tokenRefreshFailed(Int)
 }

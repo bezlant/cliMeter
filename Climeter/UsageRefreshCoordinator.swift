@@ -26,6 +26,7 @@ class UsageRefreshCoordinator: ObservableObject {
     // endpoint rate-limits aggressively (see anthropics/claude-code#31637)
     // and stays locked out for 30+ minutes even at 5-minute retry intervals.
     private let maxInterval: TimeInterval = 900.0
+    private var rateLimitRetryNotBefore: Date?
 
     private var lastAutoStartResetTime: Date?
     private var lastStaleKeychainReadAt: Date?
@@ -60,11 +61,34 @@ class UsageRefreshCoordinator: ObservableObject {
     }
 
     private func scheduleNextPoll() {
+        scheduleNextPoll(after: nil, jitter: true)
+    }
+
+    private func scheduleNextPoll(after delay: TimeInterval?, jitter: Bool) {
         timer?.invalidate()
         // Add ±10% jitter to avoid two coordinators staying phase-locked
         // and colliding on every poll cycle.
-        let jitter = Double.random(in: 0.9...1.1)
-        let interval = currentInterval * jitter
+        let baseInterval: TimeInterval
+        let shouldJitter: Bool
+        if let delay {
+            baseInterval = delay
+            shouldJitter = jitter
+        } else if let rateLimitRetryNotBefore {
+            let remaining = rateLimitRetryNotBefore.timeIntervalSince(Date.now)
+            if remaining > 0 {
+                baseInterval = remaining
+                shouldJitter = false
+            } else {
+                self.rateLimitRetryNotBefore = nil
+                baseInterval = currentInterval
+                shouldJitter = jitter
+            }
+        } else {
+            baseInterval = currentInterval
+            shouldJitter = jitter
+        }
+        let boundedBaseInterval = max(0, baseInterval)
+        let interval = shouldJitter ? boundedBaseInterval * Double.random(in: 0.9...1.1) : boundedBaseInterval
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
             self?.refresh()
             self?.scheduleNextPoll()
@@ -85,6 +109,7 @@ class UsageRefreshCoordinator: ObservableObject {
             Log.coordinator.debug("[\(self.profileID)] refresh skipped — already loading")
             return
         }
+        guard !deferRefreshDuringRateLimit() else { return }
 
         if readOnly {
             isLoading = true
@@ -136,6 +161,7 @@ class UsageRefreshCoordinator: ObservableObject {
                 self.errorMessage = nil
                 self.lastSuccessAt = Date()
                 self.isStale = false
+                self.rateLimitRetryNotBefore = nil
                 self.checkAutoStart(credential: credential, usage: fetchedData)
                 self.stepDownBackoff()
             } catch {
@@ -156,6 +182,7 @@ class UsageRefreshCoordinator: ObservableObject {
                     self.errorMessage = nil
                     self.lastSuccessAt = Date()
                     self.isStale = false
+                    self.rateLimitRetryNotBefore = nil
                     self.checkAutoStart(credential: credential, usage: fetchedData)
                     self.stepDownBackoff()
                 } catch {
@@ -181,6 +208,7 @@ class UsageRefreshCoordinator: ObservableObject {
     @MainActor
     private func runReadOnlyCycle(forceKeychainReread: Bool) async {
         guard !Task.isCancelled else { return }
+        guard !deferRefreshDuringRateLimit() else { return }
         let cached = credentialProvider()
         var action = CLICredentialPolicy.action(cached: cached, keychain: nil, now: Date.now)
         if action == .rereadKeychain {
@@ -251,6 +279,7 @@ class UsageRefreshCoordinator: ObservableObject {
         errorMessage = nil
         lastSuccessAt = Date()
         isStale = false
+        rateLimitRetryNotBefore = nil
         lastStaleKeychainReadAt = nil
         if fromKeychain {
             checkAutoStart(credential: credential, usage: data)
@@ -289,21 +318,34 @@ class UsageRefreshCoordinator: ObservableObject {
     }
 
     private func handleFetchError(_ error: Error) {
-        let is429 = (error as? ClaudeAPIError).map {
-            if case .httpError(429) = $0 { return true }
-            return false
-        } ?? false
+        let rateLimit = Self.rateLimitDetails(for: error)
 
-        if is429 {
+        if rateLimit.isRateLimited {
             currentInterval = min(currentInterval * 2, maxInterval)
+            let delay = max(currentInterval, rateLimit.retryAfter ?? 0)
+            rateLimitRetryNotBefore = Date.now.addingTimeInterval(delay)
             Log.coordinator.info("[\(self.profileID)] backoff increased → \(self.currentInterval)s")
             errorMessage = Self.describeError(error, context: "fetch")
-            scheduleNextPoll()
+            scheduleNextPoll(after: delay, jitter: false)
         }
 
         if usageData == nil, errorMessage == nil {
             errorMessage = Self.describeError(error, context: "fetch")
         }
+    }
+
+    private func deferRefreshDuringRateLimit(now: Date = Date.now) -> Bool {
+        guard let rateLimitRetryNotBefore else { return false }
+        let remaining = rateLimitRetryNotBefore.timeIntervalSince(now)
+        guard remaining > 0 else {
+            self.rateLimitRetryNotBefore = nil
+            return false
+        }
+
+        Log.coordinator.info("[\(self.profileID)] rate-limit cooldown active; deferring \(Int(ceil(remaining)))s")
+        errorMessage = Self.describeError(ClaudeAPIError.rateLimited(retryAfter: remaining), context: "fetch")
+        scheduleNextPoll(after: remaining, jitter: false)
+        return true
     }
 
     /// Halve the polling interval after a successful fetch instead of jumping
@@ -326,7 +368,7 @@ class UsageRefreshCoordinator: ObservableObject {
             return "Session expired — run /login"
         case .tokenRefreshFailed(400):
             return "Token invalid — run /login"
-        case .httpError(429):
+        case .httpError(429), .rateLimited:
             return "Rate limited — retrying soon"
         case .httpError(let code), .tokenRefreshFailed(let code):
             return "HTTP \(code)"
@@ -336,6 +378,21 @@ class UsageRefreshCoordinator: ObservableObject {
             return "Unexpected data format"
         case .invalidCredential:
             return "Invalid credential"
+        }
+    }
+
+    private static func rateLimitDetails(for error: Error) -> (isRateLimited: Bool, retryAfter: TimeInterval?) {
+        guard let apiError = error as? ClaudeAPIError else {
+            return (false, nil)
+        }
+
+        switch apiError {
+        case .httpError(429):
+            return (true, nil)
+        case .rateLimited(let retryAfter):
+            return (true, retryAfter)
+        default:
+            return (false, nil)
         }
     }
 
