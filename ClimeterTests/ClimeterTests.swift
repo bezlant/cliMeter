@@ -1,43 +1,39 @@
-import AppKit
 import SwiftUI
+import Vision
 import XCTest
 @testable import Climeter
 
-private struct AccessibilitySnapshot {
-    let role: NSAccessibility.Role?
-    let label: String?
-    let value: String?
-    let identifier: String?
-    let frame: NSRect
+private enum RenderedTextError: Error {
+    case renderingFailed
 }
 
 @MainActor
-private func accessibilitySnapshots(from root: NSView) -> [AccessibilitySnapshot] {
-    var snapshots: [AccessibilitySnapshot] = []
-    var visited = Set<ObjectIdentifier>()
-
-    func walk(_ element: any NSAccessibilityProtocol, depth: Int) {
-        guard depth <= 12 else { return }
-        let objectID = ObjectIdentifier(element as AnyObject)
-        guard visited.insert(objectID).inserted else { return }
-
-        snapshots.append(AccessibilitySnapshot(
-            role: element.accessibilityRole(),
-            label: element.accessibilityLabel(),
-            value: element.accessibilityValue() as? String,
-            identifier: element.accessibilityIdentifier(),
-            frame: element.accessibilityFrame()
-        ))
-
-        for child in element.accessibilityChildren() ?? [] {
-            if let accessible = child as? any NSAccessibilityProtocol {
-                walk(accessible, depth: depth + 1)
-            }
-        }
+private func renderedImage<V: View>(from view: V) throws -> CGImage {
+    let renderer = ImageRenderer(content: view
+        .background(Color.white)
+        .environment(\.colorScheme, .light))
+    renderer.scale = 8
+    guard let image = renderer.cgImage else {
+        throw RenderedTextError.renderingFailed
     }
+    return image
+}
 
-    walk(root, depth: 0)
-    return snapshots
+private func recognizedText(in image: CGImage) throws -> [VNRecognizedText] {
+    let request = VNRecognizeTextRequest()
+    request.recognitionLevel = .accurate
+    request.recognitionLanguages = ["en-US"]
+    request.usesLanguageCorrection = false
+
+    let handler = VNImageRequestHandler(cgImage: image)
+    try handler.perform([request])
+    return (request.results ?? []).compactMap { observation in
+        observation.topCandidates(1).first
+    }
+}
+
+private func recognizedTokens(in text: String) -> [String] {
+    text.split { !$0.isLetter && !$0.isNumber }.map(String.init)
 }
 
 final class ClimeterTests: XCTestCase {
@@ -125,8 +121,20 @@ final class ClimeterTests: XCTestCase {
     }
 
     @MainActor
-    func test_profileCardStaleStatusIsOneLineWithoutRetryControl() throws {
+    func test_profileCardRendersStaleStatusOnOneLineAtProductionWidth() throws {
         let now = Date(timeIntervalSince1970: 20_000)
+        let expectedStatus = "Updated 4h 6m ago — rate limited, retrying"
+        XCTAssertEqual(
+            ClaudeStalePresentation.waitingMessage(
+                credentialSource: .cliSynced,
+                isStale: true,
+                lastSuccessAt: now.addingTimeInterval(-(4 * 3_600 + 6 * 60)),
+                currentTime: now,
+                errorMessage: "Rate limited — retrying soon"
+            ),
+            expectedStatus
+        )
+
         let card = ProfileCard(
             profile: Profile(name: "Claude", credentialSource: .cliSynced),
             usageData: UsageData(
@@ -143,14 +151,30 @@ final class ClimeterTests: XCTestCase {
         .padding(10)
         .frame(width: 260)
 
-        let host = NSHostingView(rootView: card)
-        host.frame = NSRect(x: 0, y: 0, width: 260, height: 180)
-        host.layoutSubtreeIfNeeded()
+        let image = try renderedImage(from: card)
+        let observations = try recognizedText(in: image)
+        let recognizedStrings = observations.map(\.string)
+        let tokens = recognizedStrings.flatMap(recognizedTokens)
 
-        let snapshots = accessibilitySnapshots(from: host)
-        XCTAssertFalse(snapshots.contains {
-            $0.role == .button && ($0.label == "Retry" || $0.value == "Retry")
-        })
+        XCTAssertTrue(tokens.contains("Claude"), "Rendered card text: \(recognizedStrings)")
+
+        let expectedTokens = recognizedTokens(in: expectedStatus)
+        let status = try XCTUnwrap(observations.first {
+            recognizedTokens(in: $0.string) == expectedTokens
+        }, "Rendered card text: \(recognizedStrings)")
+
+        var tokenMidpoints: [CGFloat] = []
+        var searchStart = status.string.startIndex
+        for token in expectedTokens {
+            let searchRange = searchStart..<status.string.endIndex
+            let range = try XCTUnwrap(status.string.range(of: token, range: searchRange))
+            let box = try XCTUnwrap(try status.boundingBox(for: range))
+            tokenMidpoints.append(box.boundingBox.midY)
+            searchStart = range.upperBound
+        }
+
+        let baselineSpread = try XCTUnwrap(tokenMidpoints.max()) - XCTUnwrap(tokenMidpoints.min())
+        XCTAssertLessThanOrEqual(baselineSpread, 0.01)
     }
 
     func test_fileLogUsesTemporaryDirectoryUnderXCTest() {
