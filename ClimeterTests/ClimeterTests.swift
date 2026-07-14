@@ -1,5 +1,44 @@
+import AppKit
+import SwiftUI
 import XCTest
 @testable import Climeter
+
+private struct AccessibilitySnapshot {
+    let role: NSAccessibility.Role?
+    let label: String?
+    let value: String?
+    let identifier: String?
+    let frame: NSRect
+}
+
+@MainActor
+private func accessibilitySnapshots(from root: NSView) -> [AccessibilitySnapshot] {
+    var snapshots: [AccessibilitySnapshot] = []
+    var visited = Set<ObjectIdentifier>()
+
+    func walk(_ element: any NSAccessibilityProtocol, depth: Int) {
+        guard depth <= 12 else { return }
+        let objectID = ObjectIdentifier(element as AnyObject)
+        guard visited.insert(objectID).inserted else { return }
+
+        snapshots.append(AccessibilitySnapshot(
+            role: element.accessibilityRole(),
+            label: element.accessibilityLabel(),
+            value: element.accessibilityValue() as? String,
+            identifier: element.accessibilityIdentifier(),
+            frame: element.accessibilityFrame()
+        ))
+
+        for child in element.accessibilityChildren() ?? [] {
+            if let accessible = child as? any NSAccessibilityProtocol {
+                walk(accessible, depth: depth + 1)
+            }
+        }
+    }
+
+    walk(root, depth: 0)
+    return snapshots
+}
 
 final class ClimeterTests: XCTestCase {
     func test_testTargetIsWired() {
@@ -83,6 +122,35 @@ final class ClimeterTests: XCTestCase {
             ),
             "Updated 11m ago — rate limited, retrying"
         )
+    }
+
+    @MainActor
+    func test_profileCardStaleStatusIsOneLineWithoutRetryControl() throws {
+        let now = Date(timeIntervalSince1970: 20_000)
+        let card = ProfileCard(
+            profile: Profile(name: "Claude", credentialSource: .cliSynced),
+            usageData: UsageData(
+                fiveHour: UsageWindow(utilization: 5, resetsAt: now.addingTimeInterval(-60)),
+                sevenDay: UsageWindow(utilization: 80, resetsAt: now.addingTimeInterval(48 * 3_600))
+            ),
+            errorMessage: "Rate limited — retrying soon",
+            lastSuccessAt: now.addingTimeInterval(-(4 * 3_600 + 6 * 60)),
+            isStale: true,
+            isCLIActive: false,
+            showProfileName: false,
+            currentTime: now
+        )
+        .padding(10)
+        .frame(width: 260)
+
+        let host = NSHostingView(rootView: card)
+        host.frame = NSRect(x: 0, y: 0, width: 260, height: 180)
+        host.layoutSubtreeIfNeeded()
+
+        let snapshots = accessibilitySnapshots(from: host)
+        XCTAssertFalse(snapshots.contains {
+            $0.role == .button && ($0.label == "Retry" || $0.value == "Retry")
+        })
     }
 
     func test_fileLogUsesTemporaryDirectoryUnderXCTest() {

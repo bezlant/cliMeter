@@ -72,8 +72,7 @@ struct PopoverView: View {
                                     isStale: profileManager.allStale[profile.id] == true,
                                     isCLIActive: profileManager.cliActiveProfileID == profile.id,
                                     showProfileName: profileManager.authenticatedProfiles.count > 1,
-                                    currentTime: currentTime,
-                                    onRetry: { profileManager.refresh() }
+                                    currentTime: currentTime
                                 )
                                 .padding(10)
                                 .background(
@@ -262,7 +261,6 @@ struct ProfileCard: View {
     let isCLIActive: Bool
     let showProfileName: Bool
     let currentTime: Date
-    let onRetry: () -> Void
 
     private var staleAge: TimeInterval? {
         guard usageData != nil, let last = lastSuccessAt else { return nil }
@@ -345,18 +343,14 @@ struct ProfileCard: View {
             }
 
             if let staleWaitingText {
-                HStack(spacing: 6) {
-                    Text(staleWaitingText)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 4)
-                    Button("Retry", action: onRetry)
-                        .font(.system(size: 10, weight: .medium))
-                        .controlSize(.small)
-                        .buttonStyle(.borderless)
-                }
+                Text(staleWaitingText)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
+                    .allowsTightening(true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("claude-stale-status")
             }
         }
     }
