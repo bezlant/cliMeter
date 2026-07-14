@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import Vision
 import XCTest
@@ -19,16 +20,79 @@ private func renderedImage<V: View>(from view: V) throws -> CGImage {
     return image
 }
 
-private func recognizedText(in image: CGImage) throws -> [VNRecognizedText] {
+@MainActor
+private func hostedBitmap<V: View>(from view: V) throws -> CGImage {
+    // ImageRenderer substitutes a placeholder for Button, so capture the live hosted view.
+    let host = NSHostingView(rootView: view
+        .background(Color.white)
+        .environment(\.colorScheme, .light))
+    let size = host.fittingSize
+    guard size.width > 0, size.height > 0 else {
+        throw RenderedTextError.renderingFailed
+    }
+
+    let window = NSWindow(
+        contentRect: NSRect(origin: NSPoint(x: -10_000, y: -10_000), size: size),
+        styleMask: .borderless,
+        backing: .buffered,
+        defer: false
+    )
+    window.isReleasedWhenClosed = false
+    window.contentView = host
+    host.frame = NSRect(origin: .zero, size: size)
+    window.orderFrontRegardless()
+    defer {
+        window.orderOut(nil)
+        window.close()
+    }
+
+    host.layoutSubtreeIfNeeded()
+    host.displayIfNeeded()
+
+    let scale: CGFloat = 8
+    guard let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: Int(ceil(size.width * scale)),
+        pixelsHigh: Int(ceil(size.height * scale)),
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bitmapFormat: [],
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    ) else {
+        throw RenderedTextError.renderingFailed
+    }
+    bitmap.size = size
+    host.cacheDisplay(in: host.bounds, to: bitmap)
+    guard let image = bitmap.cgImage else {
+        throw RenderedTextError.renderingFailed
+    }
+    return image
+}
+
+private func bottomCrop(of image: CGImage, pointHeight: CGFloat = 48, scale: CGFloat = 8) throws -> CGImage {
+    let height = min(image.height, Int(ceil(pointHeight * scale)))
+    let rect = CGRect(x: 0, y: image.height - height, width: image.width, height: height)
+    guard let crop = image.cropping(to: rect) else {
+        throw RenderedTextError.renderingFailed
+    }
+    return crop
+}
+
+private func recognizedText(in image: CGImage, maximumCandidates: Int = 1) throws -> [VNRecognizedText] {
     let request = VNRecognizeTextRequest()
     request.recognitionLevel = .accurate
     request.recognitionLanguages = ["en-US"]
     request.usesLanguageCorrection = false
+    request.minimumTextHeight = 0
 
     let handler = VNImageRequestHandler(cgImage: image)
     try handler.perform([request])
-    return (request.results ?? []).compactMap { observation in
-        observation.topCandidates(1).first
+    return (request.results ?? []).flatMap { observation in
+        observation.topCandidates(maximumCandidates)
     }
 }
 
@@ -121,7 +185,7 @@ final class ClimeterTests: XCTestCase {
     }
 
     @MainActor
-    func test_profileCardRendersStaleStatusOnOneLineAtProductionWidth() throws {
+    func test_profileCardRendersOneLineStaleStatusWithoutRetryControl() throws {
         let now = Date(timeIntervalSince1970: 20_000)
         let expectedStatus = "Updated 4h 6m ago — rate limited, retrying"
         XCTAssertEqual(
@@ -175,6 +239,35 @@ final class ClimeterTests: XCTestCase {
 
         let baselineSpread = try XCTUnwrap(tokenMidpoints.max()) - XCTUnwrap(tokenMidpoints.min())
         XCTAssertLessThanOrEqual(baselineSpread, 0.01)
+
+        let calibration = VStack(alignment: .leading, spacing: 8) {
+            Text("Calibration")
+            Button("Retry") {}
+                .font(.system(size: 10, weight: .medium))
+                .controlSize(.small)
+                .buttonStyle(.borderless)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(10)
+        .frame(width: 260)
+        let calibrationFooter = try bottomCrop(of: hostedBitmap(from: calibration))
+        let calibrationStrings = try recognizedText(in: calibrationFooter, maximumCandidates: 10).map(\.string)
+        XCTAssertTrue(
+            calibrationStrings.flatMap(recognizedTokens).contains("Retry"),
+            "Hosted calibration footer text: \(calibrationStrings)"
+        )
+
+        let hostedFooter = try bottomCrop(of: hostedBitmap(from: card))
+        let hostedFooterStrings = try recognizedText(in: hostedFooter).map(\.string)
+        XCTAssertTrue(
+            hostedFooterStrings.contains { recognizedTokens(in: $0) == expectedTokens },
+            "Hosted production footer text: \(hostedFooterStrings)"
+        )
+        let hostedFooterCandidates = try recognizedText(in: hostedFooter, maximumCandidates: 10).map(\.string)
+        XCTAssertFalse(
+            hostedFooterCandidates.flatMap(recognizedTokens).contains("Retry"),
+            "Hosted production footer text candidates: \(hostedFooterCandidates)"
+        )
     }
 
     func test_fileLogUsesTemporaryDirectoryUnderXCTest() {
