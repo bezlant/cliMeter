@@ -66,6 +66,7 @@ struct PopoverView: View {
                             ForEach(Array(profileManager.authenticatedProfiles.enumerated()), id: \.element.id) { index, profile in
                                 ProfileCard(
                                     profile: profile,
+                                    usageSource: profileManager.claudeUsageSource,
                                     usageData: profileManager.allUsageData[profile.id],
                                     errorMessage: profileManager.allErrors[profile.id],
                                     lastSuccessAt: profileManager.allLastSuccess[profile.id],
@@ -211,18 +212,22 @@ enum ClaudeStalePresentation {
     static let staleThreshold: TimeInterval = 10 * 60
 
     static func isWaiting(
+        usageSource: ClaudeUsageSource,
         credentialSource: CredentialSource,
         isStale: Bool,
         lastSuccessAt: Date?,
         currentTime: Date
     ) -> Bool {
-        guard credentialSource == .cliSynced else { return false }
+        guard usageSource == .statusLineFile || credentialSource == .cliSynced else {
+            return false
+        }
         if isStale { return true }
         guard let lastSuccessAt else { return false }
         return currentTime.timeIntervalSince(lastSuccessAt) > staleThreshold
     }
 
     static func waitingMessage(
+        usageSource: ClaudeUsageSource,
         credentialSource: CredentialSource,
         isStale: Bool,
         lastSuccessAt: Date?,
@@ -230,6 +235,7 @@ enum ClaudeStalePresentation {
         errorMessage: String? = nil
     ) -> String? {
         guard isWaiting(
+            usageSource: usageSource,
             credentialSource: credentialSource,
             isStale: isStale,
             lastSuccessAt: lastSuccessAt,
@@ -254,6 +260,7 @@ enum ClaudeStalePresentation {
 
 struct ProfileCard: View {
     let profile: Profile
+    let usageSource: ClaudeUsageSource
     let usageData: UsageData?
     let errorMessage: String?
     let lastSuccessAt: Date?
@@ -270,6 +277,7 @@ struct ProfileCard: View {
 
     private var staleWaitingText: String? {
         ClaudeStalePresentation.waitingMessage(
+            usageSource: usageSource,
             credentialSource: profile.credentialSource,
             isStale: isStale,
             lastSuccessAt: lastSuccessAt,
@@ -285,6 +293,7 @@ struct ProfileCard: View {
     private func staleLabel(_ age: TimeInterval) -> some View {
         Text("stale \(ClaudeStalePresentation.formatStaleAge(age))")
             .font(.system(size: 9))
+            .monospacedDigit()
             .foregroundColor(.secondary.opacity(0.7))
     }
 
@@ -322,17 +331,7 @@ struct ProfileCard: View {
                     window: data.sevenDay,
                     currentTime: currentTime
                 )
-            } else if let error = errorMessage {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.orange)
-                    Text(error)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-            } else if staleWaitingText == nil {
+            } else if errorMessage == nil, staleWaitingText == nil {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.small)
@@ -342,9 +341,23 @@ struct ProfileCard: View {
                 }
             }
 
+            if let errorMessage, usageData == nil || usageSource == .statusLineFile {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                    Text(errorMessage)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             if let staleWaitingText {
                 Text(staleWaitingText)
                     .font(.system(size: 10))
+                    .monospacedDigit()
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.9)

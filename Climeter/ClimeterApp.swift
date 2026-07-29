@@ -29,6 +29,7 @@ struct ClimeterApp: App {
                     let activeProfile = profileManager.cliActiveProfile
                     let activeProfileID = activeProfile?.id
                     let isStale = ClaudeStalePresentation.isWaiting(
+                        usageSource: profileManager.claudeUsageSource,
                         credentialSource: activeProfile?.credentialSource ?? .cliSynced,
                         isStale: activeProfileID.map { profileManager.allStale[$0] == true } ?? false,
                         lastSuccessAt: activeProfileID.flatMap { profileManager.allLastSuccess[$0] },

@@ -129,6 +129,7 @@ final class ClimeterTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 1_000)
 
         XCTAssertNil(ClaudeStalePresentation.waitingMessage(
+            usageSource: .keychainManual,
             credentialSource: .cliSynced,
             isStale: false,
             lastSuccessAt: now.addingTimeInterval(-599),
@@ -136,6 +137,7 @@ final class ClimeterTests: XCTestCase {
         ))
         XCTAssertEqual(
             ClaudeStalePresentation.waitingMessage(
+                usageSource: .keychainManual,
                 credentialSource: .cliSynced,
                 isStale: false,
                 lastSuccessAt: now.addingTimeInterval(-601),
@@ -145,6 +147,7 @@ final class ClimeterTests: XCTestCase {
         )
         XCTAssertEqual(
             ClaudeStalePresentation.waitingMessage(
+                usageSource: .keychainManual,
                 credentialSource: .cliSynced,
                 isStale: true,
                 lastSuccessAt: now.addingTimeInterval(-60),
@@ -154,6 +157,7 @@ final class ClimeterTests: XCTestCase {
         )
         XCTAssertEqual(
             ClaudeStalePresentation.waitingMessage(
+                usageSource: .keychainManual,
                 credentialSource: .cliSynced,
                 isStale: true,
                 lastSuccessAt: nil,
@@ -162,10 +166,36 @@ final class ClimeterTests: XCTestCase {
             "Waiting for Claude Code"
         )
         XCTAssertNil(ClaudeStalePresentation.waitingMessage(
+            usageSource: .keychainManual,
             credentialSource: .selfOwned,
             isStale: true,
             lastSuccessAt: now.addingTimeInterval(-601),
             currentTime: now
+        ))
+    }
+
+    func test_statusLineSourceUsesWaitingPresentationRegardlessOfCredentialSource() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertEqual(
+            ClaudeStalePresentation.waitingMessage(
+                usageSource: .statusLineFile,
+                credentialSource: .selfOwned,
+                isStale: false,
+                lastSuccessAt: now.addingTimeInterval(-601),
+                currentTime: now
+            ),
+            "Updated 10m ago — waiting for Claude Code"
+        )
+    }
+
+    func test_manualSelfOwnedSourcePreservesExistingNonWaitingPresentation() {
+        XCTAssertNil(ClaudeStalePresentation.waitingMessage(
+            usageSource: .keychainManual,
+            credentialSource: .selfOwned,
+            isStale: true,
+            lastSuccessAt: Date(timeIntervalSince1970: 1),
+            currentTime: Date(timeIntervalSince1970: 1_000)
         ))
     }
 
@@ -174,6 +204,7 @@ final class ClimeterTests: XCTestCase {
 
         XCTAssertEqual(
             ClaudeStalePresentation.waitingMessage(
+                usageSource: .keychainManual,
                 credentialSource: .cliSynced,
                 isStale: true,
                 lastSuccessAt: now.addingTimeInterval(-660),
@@ -190,6 +221,7 @@ final class ClimeterTests: XCTestCase {
         let expectedStatus = "Updated 4h 6m ago — rate limited, retrying"
         XCTAssertEqual(
             ClaudeStalePresentation.waitingMessage(
+                usageSource: .keychainManual,
                 credentialSource: .cliSynced,
                 isStale: true,
                 lastSuccessAt: now.addingTimeInterval(-(4 * 3_600 + 6 * 60)),
@@ -201,6 +233,7 @@ final class ClimeterTests: XCTestCase {
 
         let card = ProfileCard(
             profile: Profile(name: "Claude", credentialSource: .cliSynced),
+            usageSource: .keychainManual,
             usageData: UsageData(
                 fiveHour: UsageWindow(utilization: 5, resetsAt: now.addingTimeInterval(-60)),
                 sevenDay: UsageWindow(utilization: 80, resetsAt: now.addingTimeInterval(48 * 3_600))
@@ -268,6 +301,46 @@ final class ClimeterTests: XCTestCase {
             hostedFooterCandidates.flatMap(recognizedTokens).contains("Retry"),
             "Hosted production footer text candidates: \(hostedFooterCandidates)"
         )
+    }
+
+    @MainActor
+    func test_profileCardRendersStatusLineFileErrorBelowLastGoodUsage() throws {
+        let now = Date(timeIntervalSince1970: 20_000)
+        let errors = [
+            "Climeter usage exporter needs an update.",
+            "Claude usage file is invalid."
+        ]
+
+        for error in errors {
+            let card = ProfileCard(
+                profile: Profile(name: "Claude", credentialSource: .selfOwned),
+                usageSource: .statusLineFile,
+                usageData: UsageData(
+                    fiveHour: UsageWindow(utilization: 5, resetsAt: now.addingTimeInterval(3_600)),
+                    sevenDay: UsageWindow(utilization: 80, resetsAt: now.addingTimeInterval(48 * 3_600))
+                ),
+                errorMessage: error,
+                lastSuccessAt: now,
+                isStale: false,
+                isCLIActive: false,
+                showProfileName: false,
+                currentTime: now
+            )
+            .padding(10)
+            .frame(width: 260)
+
+            let recognizedStrings = try recognizedText(in: renderedImage(from: card)).map(\.string)
+            let recognized = recognizedStrings.flatMap(recognizedTokens)
+
+            XCTAssertTrue(recognized.contains("Session"), "Rendered card text: \(recognizedStrings)")
+            XCTAssertTrue(recognized.contains("Week"), "Rendered card text: \(recognizedStrings)")
+            for token in recognizedTokens(in: error) {
+                XCTAssertTrue(
+                    recognized.contains(token),
+                    "Missing \(token) in rendered card text: \(recognizedStrings)"
+                )
+            }
+        }
     }
 
     func test_fileLogUsesTemporaryDirectoryUnderXCTest() {

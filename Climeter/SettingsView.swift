@@ -27,17 +27,27 @@ struct SettingsView: View {
             Section("Claude (Anthropic)") {
                 Toggle("Show Claude usage", isOn: $profileManager.claudeEnabled)
 
-                HStack {
-                    Text("Credentials")
-                    Spacer()
-                    Text("macOS Keychain via Claude Code (read-only)")
+                Picker("Usage source", selection: $profileManager.claudeUsageSource) {
+                    Text("Claude Code status line — password-free")
+                        .tag(ClaudeUsageSource.statusLineFile)
+                    Text("macOS Keychain — may ask for password")
+                        .tag(ClaudeUsageSource.keychainManual)
+                }
+                .pickerStyle(.menu)
+
+                if profileManager.claudeUsageSource == .keychainManual {
+                    Text("Compatibility mode may trigger a macOS password prompt.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+
+                    Text("Run /login in Claude Code to connect accounts. Auto-switch applies only to Claude profiles.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Usage updates after Claude Code responds. No OAuth credential is read.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-
-                Text("Run /login in Claude Code to connect accounts. Auto-switch applies only to Claude profiles.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
 
             Section("Codex") {
@@ -79,6 +89,7 @@ struct SettingsView: View {
 
             Section("Auto-Switch") {
                 Toggle("Switch accounts automatically", isOn: $profileManager.autoSwitchEnabled)
+                    .disabled(profileManager.claudeUsageSource == .statusLineFile)
 
                 if profileManager.autoSwitchEnabled {
                     HStack {
@@ -88,6 +99,13 @@ struct SettingsView: View {
                             .monospacedDigit()
                             .frame(width: 40, alignment: .trailing)
                     }
+                    .disabled(profileManager.claudeUsageSource == .statusLineFile)
+                }
+
+                if profileManager.claudeUsageSource == .statusLineFile {
+                    Text("Requires Keychain compatibility mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
 
