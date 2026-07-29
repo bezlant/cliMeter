@@ -9,6 +9,11 @@ The default Claude usage source is now the sanitized status-line file. The
 legacy Keychain/coordinator path is retained behind explicit
 `keychainManual` selection.
 
+The subsequent review findings were reproduced and resolved: provider work is
+now cancellable and generation-gated, injected managers route all
+`UserDefaults` state through their injected store, and the disabled Claude
+state closes the status-line authentication gate.
+
 ## Hypothesis and evidence
 
 ### Hypothesis
@@ -73,6 +78,30 @@ RED log: `/tmp/climeter-task3-red.log`.
 The same focused suite passed all 6 tests after the minimal routing
 implementation.
 
+### Review-fix RED/GREEN cycles
+
+The review identified four concrete gaps. Each was covered before its
+production fix:
+
+- Injected-defaults isolation and disabled-authentication tests first failed to
+  compile because `ProfileStore` did not accept an injected `UserDefaults` for
+  all relevant operations. RED log:
+  `/tmp/climeter-task3-review-defaults-red.log`.
+- After routing those APIs and the manager call sites, the expanded focused
+  suite passed 9/9. GREEN log:
+  `/tmp/climeter-task3-review-defaults-green.log`.
+- Deterministic stale-provider tests then failed to compile because delayed CLI
+  detection and credential work were not injectable or cancellable. RED log:
+  `/tmp/climeter-task3-review-generation-red.log`.
+- The first generation implementation exposed an additional behavioral defect:
+  initialization scheduled three Keychain detections instead of one because
+  property observers started providers before the explicit initialization
+  start. The focused run passed 9/11 and recorded the failing assertions before
+  the initialization guard was added.
+- The final focused suite passed 11/11, including deliberate execution of a
+  cancelled old-generation operation. GREEN log:
+  `/tmp/climeter-task3-review-generation-green.log`.
+
 ## Implementation
 
 ### Source and dependency boundary
@@ -80,9 +109,13 @@ implementation.
 - Added `ClaudeUsageSource` with `statusLineFile` and `keychainManual`.
 - Added `ProfileManagerDependencies` for CLI credential reads, Keychain item
   existence, migration credential reads, legacy file moves, status-line store
-  construction, and power monitoring.
+  construction, power monitoring, cancellable delayed detection, and
+  cancellable credential work.
 - Added source load/save methods to `ProfileStore`, using injectable
   `UserDefaults` and defaulting missing or invalid values to `statusLineFile`.
+- Routed every `UserDefaults`-backed `ProfileStore` operation used by an
+  injected `ProfileManager` through that manager's injected defaults. Live
+  callers retain `.standard` via default arguments.
 - Added `PowerStateMonitoring` and made the live monitor conform.
 
 ### ProfileManager routing
@@ -105,6 +138,16 @@ implementation.
   injected closures.
 - Cancels tasks, timers, subscriptions, and coordinators when changing
   providers.
+- Tracks delayed detection and credential work cancellation handles and a
+  lock-protected monotonically increasing provider generation. The generation
+  is checked immediately before a credential dependency read and again on the
+  main queue immediately before processing its result.
+- Keeps Claude source/enabled reads for provider dispatch on the main queue;
+  background credential work observes only the thread-safe generation token.
+- Suppresses Claude source/enabled property-observer side effects during
+  initialization so the provider starts exactly once.
+- Closes and reopens status-line authentication/display gates when Claude is
+  disabled and re-enabled, including persisted-disabled launches.
 
 ### Compatibility and Codex behavior
 
@@ -132,13 +175,13 @@ xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-Result: 29/29 tests passed, zero failures.
+Result: 34/34 tests passed, zero failures.
 
-- `ProfileManagerStatusLineSourceTests`: 6/6
+- `ProfileManagerStatusLineSourceTests`: 11/11
 - `ProfileManagerMigrationTests`: 8/8
 - `UsageRefreshCoordinatorReadOnlyTests`: 15/15
 
-Selected-suite log: `/tmp/climeter-task3-selected-final.log`.
+Selected-suite log: `/tmp/climeter-task3-review-selected.log`.
 
 ### Full suite
 
@@ -150,14 +193,21 @@ xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-Result: 94/94 tests passed, zero failures.
+Result: 99/99 tests passed, zero failures.
 
-Full-suite log: `/tmp/climeter-task3-full.log`.
+Full-suite log: `/tmp/climeter-task3-review-full.log`.
 
 ### Static inspection
 
 - `git diff --check`: clean.
 - All four project deployment-target entries remain `14.0`.
+- The final build/test log contains no compiler warnings.
+- Status-line source tests remove only their unique suite domain; an isolation
+  test proves injected manager operations leave sentinel standard preferences
+  unchanged.
+- Every `UserDefaults`-backed `ProfileStore` call in the injected
+  `ProfileManager` passes its injected defaults; credential-store operations
+  remain unchanged.
 - The only direct `ClaudeCodeSyncService` accesses in Task 3 production changes
   are inside `ProfileManagerDependencies.live`; status-line mode never invokes
   those closures.
@@ -172,6 +222,12 @@ Full-suite log: `/tmp/climeter-task3-full.log`.
 - Zero `Claude Code-credentials` reads in status-line lifecycle: implemented
   through routing and dependency-counter test covering init, timer, refresh,
   wake/unlock, delayed detection window, recomputation, and toggles.
+- Stale provider work: deterministic tests cover
+  `keychainManual -> statusLineFile` and rapid
+  `keychainManual -> statusLineFile -> keychainManual` transitions; cancelled
+  old generations cannot enqueue or perform a credential read.
+- Disabled authentication gate: tested at persisted-disabled launch and across
+  disable/re-enable transitions.
 - No automatic fallback: verified by code inspection.
 - Export schema allowlist and file permissions: unchanged from prior tasks.
 - Codex behavior: existing full suite passes; source routing does not enter
@@ -188,6 +244,7 @@ Full-suite log: `/tmp/climeter-task3-full.log`.
 - A cross-review process was launched because the change affects credential and
   migration routing, but it exceeded the handoff window and was stopped without
   emitting findings; its result file reported only `Execution error` and its
-  stderr was empty. The completed evidence is therefore the direct self-review,
-  selected suites, full suite, diff inspection, and constraint audit above.
+  stderr was empty. A later independent review produced the four concrete
+  findings documented above; all four were reproduced and fixed with focused
+  tests.
 - No known implementation blocker remains.

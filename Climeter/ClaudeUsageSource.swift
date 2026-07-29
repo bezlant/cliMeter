@@ -14,6 +14,8 @@ struct ProfileManagerDependencies {
     var moveLegacyCredentialFile: (URL, URL) -> Void
     var makeStatusLineStore: () -> ClaudeStatusLineUsageStore
     var powerMonitor: any PowerStateMonitoring
+    var scheduleCLIDetection: (@escaping () -> Void) -> () -> Void
+    var performCredentialWork: (@escaping () -> Void) -> () -> Void
 
     static var live: ProfileManagerDependencies {
         ProfileManagerDependencies(
@@ -35,7 +37,20 @@ struct ProfileManagerDependencies {
             makeStatusLineStore: {
                 ClaudeStatusLineUsageStore()
             },
-            powerMonitor: PowerStateMonitor()
+            powerMonitor: PowerStateMonitor(),
+            scheduleCLIDetection: { operation in
+                let workItem = DispatchWorkItem(block: operation)
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + 2,
+                    execute: workItem
+                )
+                return workItem.cancel
+            },
+            performCredentialWork: { operation in
+                let workItem = DispatchWorkItem(block: operation)
+                DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
+                return workItem.cancel
+            }
         )
     }
 }

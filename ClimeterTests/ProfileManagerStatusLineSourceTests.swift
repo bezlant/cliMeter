@@ -8,15 +8,11 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
     private var defaultsSuiteName: String!
 
     override func setUpWithError() throws {
-        if let domain = Bundle.main.bundleIdentifier {
-            UserDefaults.standard.removePersistentDomain(forName: domain)
-        }
-        ProfileStore.saveCodexEnabled(false)
-        ProfileStore.saveClaudeEnabled(true)
-
         defaultsSuiteName = "ProfileManagerStatusLineSourceTests.\(UUID().uuidString)"
         defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuiteName))
         defaults.removePersistentDomain(forName: defaultsSuiteName)
+        ProfileStore.saveCodexEnabled(false, defaults: defaults)
+        ProfileStore.saveClaudeEnabled(true, defaults: defaults)
 
         temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -31,9 +27,6 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: temporaryDirectory)
         defaults.removePersistentDomain(forName: defaultsSuiteName)
-        if let domain = Bundle.main.bundleIdentifier {
-            UserDefaults.standard.removePersistentDomain(forName: domain)
-        }
     }
 
     func test_statusLineFileIsDefaultAndPersistedSource() {
@@ -68,7 +61,7 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
 
         let profileID = try XCTUnwrap(manager.cliActiveProfileID)
-        XCTAssertEqual(ProfileStore.loadCLIActiveProfileID(), profileID)
+        XCTAssertEqual(ProfileStore.loadCLIActiveProfileID(defaults: defaults), profileID)
         XCTAssertTrue(manager.authenticatedProfileIDs.contains(profileID))
         XCTAssertEqual(manager.cliActiveUsageData?.fiveHour.utilization, 23.5)
         XCTAssertEqual(manager.cliActiveUsageData?.sevenDay.utilization, 41.2)
@@ -84,8 +77,8 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
     func test_statusLineUsesValidPersistedProfileAndSurvivesAuthenticationRecomputation() throws {
         let first = Profile(name: "First")
         let selected = Profile(name: "Selected")
-        ProfileStore.saveProfiles([first, selected])
-        ProfileStore.saveCLIActiveProfileID(selected.id)
+        ProfileStore.saveProfiles([first, selected], defaults: defaults)
+        ProfileStore.saveCLIActiveProfileID(selected.id, defaults: defaults)
         let manager = ProfileManager(dependencies: dependencies(), defaults: defaults)
 
         manager.claudeEnabled = false
@@ -95,6 +88,81 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
         XCTAssertEqual(manager.cliActiveProfileID, selected.id)
         XCTAssertEqual(manager.cliActiveUsageData?.fiveHour.utilization, 23.5)
         XCTAssertTrue(manager.authenticatedProfileIDs.contains(selected.id))
+    }
+
+    func test_injectedDefaultsDoNotReadOrWriteStandardPreferences() throws {
+        let standard = UserDefaults.standard
+        let keys = [
+            "profiles",
+            "cliActiveProfileID",
+            "claudeEnabled",
+            "codexEnabled",
+            "claudeUsageSource"
+        ]
+        let originalValues = Dictionary(uniqueKeysWithValues: keys.map {
+            ($0, standard.object(forKey: $0))
+        })
+        defer {
+            for key in keys {
+                if let value = originalValues[key] ?? nil {
+                    standard.set(value, forKey: key)
+                } else {
+                    standard.removeObject(forKey: key)
+                }
+            }
+        }
+
+        let standardProfile = Profile(name: "Standard sentinel")
+        ProfileStore.saveProfiles([standardProfile])
+        ProfileStore.saveCLIActiveProfileID(standardProfile.id)
+        ProfileStore.saveClaudeEnabled(false)
+        ProfileStore.saveCodexEnabled(true)
+        ProfileStore.saveClaudeUsageSource(.keychainManual)
+
+        let suiteProfile = Profile(name: "Suite profile")
+        ProfileStore.saveProfiles([suiteProfile], defaults: defaults)
+        let manager = ProfileManager(dependencies: dependencies(), defaults: defaults)
+        manager.createProfile(name: "Suite second profile")
+        manager.claudeEnabled = false
+        manager.claudeEnabled = true
+
+        XCTAssertEqual(ProfileStore.loadProfiles().map(\.id), [standardProfile.id])
+        XCTAssertEqual(ProfileStore.loadCLIActiveProfileID(), standardProfile.id)
+        XCTAssertFalse(ProfileStore.loadClaudeEnabled())
+        XCTAssertTrue(ProfileStore.loadCodexEnabled())
+        XCTAssertEqual(ProfileStore.loadClaudeUsageSource(), .keychainManual)
+        XCTAssertEqual(ProfileStore.loadProfiles(defaults: defaults).count, 2)
+        XCTAssertEqual(manager.cliActiveProfileID, suiteProfile.id)
+    }
+
+    func test_persistedDisabledStatusLineLaunchKeepsFileAuthenticationGateClosed() throws {
+        ProfileStore.saveClaudeEnabled(false, defaults: defaults)
+
+        let manager = ProfileManager(dependencies: dependencies(), defaults: defaults)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        let profileID = try XCTUnwrap(manager.cliActiveProfileID)
+        XCTAssertFalse(manager.authenticatedProfileIDs.contains(profileID))
+        XCTAssertFalse(manager.hasAnyAuthenticated)
+        XCTAssertNil(manager.cliActiveUsageData)
+    }
+
+    func test_disablingAndReenablingClaudeClosesAndReopensFileAuthenticationGate() throws {
+        let manager = ProfileManager(dependencies: dependencies(), defaults: defaults)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let profileID = try XCTUnwrap(manager.cliActiveProfileID)
+        XCTAssertTrue(manager.authenticatedProfileIDs.contains(profileID))
+
+        manager.claudeEnabled = false
+
+        XCTAssertFalse(manager.authenticatedProfileIDs.contains(profileID))
+        XCTAssertFalse(manager.hasAnyAuthenticated)
+
+        manager.claudeEnabled = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        XCTAssertTrue(manager.authenticatedProfileIDs.contains(profileID))
+        XCTAssertTrue(manager.hasAnyAuthenticated)
     }
 
     func test_disablingClaudeStopsFileRefreshUntilReenabled() throws {
@@ -116,8 +184,9 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
 
     func test_keychainCompatibilityReadsOnlyAfterExplicitSelectionAndTearsDownFileSource() {
         let calls = CredentialCallRecorder()
+        let scheduler = ControlledCredentialScheduler()
         let manager = ProfileManager(
-            dependencies: dependencies(calls: calls),
+            dependencies: dependencies(calls: calls, scheduler: scheduler),
             defaults: defaults
         )
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
@@ -125,12 +194,59 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
         XCTAssertNotNil(manager.cliActiveUsageData)
 
         manager.claudeUsageSource = .keychainManual
-        RunLoop.main.run(until: Date().addingTimeInterval(2.2))
+        scheduler.runDelayed(at: 0)
+        scheduler.runCredentialWork(at: 0)
 
         XCTAssertGreaterThan(calls.total, 0)
         XCTAssertGreaterThan(calls.cliReads, 0)
         XCTAssertNil(manager.cliActiveUsageData)
         XCTAssertEqual(ProfileStore.loadClaudeUsageSource(defaults: defaults), .keychainManual)
+    }
+
+    func test_keychainToStatusTransitionCancelsAndInvalidatesOldDelayedRead() throws {
+        let calls = CredentialCallRecorder()
+        let scheduler = ControlledCredentialScheduler()
+        ProfileStore.saveClaudeUsageSource(.keychainManual, defaults: defaults)
+        let manager = ProfileManager(
+            dependencies: dependencies(calls: calls, scheduler: scheduler),
+            defaults: defaults
+        )
+        XCTAssertEqual(scheduler.delayed.count, 1)
+
+        manager.claudeUsageSource = .statusLineFile
+        XCTAssertTrue(try XCTUnwrap(scheduler.delayed.first).isCancelled)
+
+        scheduler.runDelayed(at: 0)
+
+        XCTAssertTrue(scheduler.credentialWork.isEmpty)
+        XCTAssertEqual(calls.cliReads, 0)
+    }
+
+    func test_rapidSourceTransitionsOnlyAllowNewestKeychainGenerationToRead() throws {
+        let calls = CredentialCallRecorder()
+        let scheduler = ControlledCredentialScheduler()
+        ProfileStore.saveClaudeUsageSource(.keychainManual, defaults: defaults)
+        let manager = ProfileManager(
+            dependencies: dependencies(calls: calls, scheduler: scheduler),
+            defaults: defaults
+        )
+
+        manager.claudeUsageSource = .statusLineFile
+        manager.claudeUsageSource = .keychainManual
+        XCTAssertEqual(scheduler.delayed.count, 2)
+        XCTAssertTrue(scheduler.delayed[0].isCancelled)
+        XCTAssertFalse(scheduler.delayed[1].isCancelled)
+
+        scheduler.runDelayed(at: 0)
+        scheduler.runDelayed(at: 0)
+        XCTAssertTrue(scheduler.credentialWork.isEmpty)
+        XCTAssertEqual(calls.cliReads, 0)
+
+        scheduler.runDelayed(at: 1)
+        XCTAssertEqual(scheduler.credentialWork.count, 1)
+        scheduler.runCredentialWork(at: 0)
+
+        XCTAssertEqual(calls.cliReads, 1)
     }
 
     private func writeUsage(fiveHour: Double, sevenDay: Double) throws {
@@ -142,40 +258,75 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
 
     private func dependencies(
         power: TestPowerStateMonitor = TestPowerStateMonitor(),
-        calls: CredentialCallRecorder = CredentialCallRecorder()
+        calls: CredentialCallRecorder = CredentialCallRecorder(),
+        scheduler: ControlledCredentialScheduler = ControlledCredentialScheduler()
     ) -> ProfileManagerDependencies {
         ProfileManagerDependencies(
             readCLICredential: { _ in
-                calls.cliReads += 1
+                calls.recordCLIRead()
                 return nil
             },
             keychainItemExists: {
-                calls.keychainExistenceChecks += 1
+                calls.recordKeychainExistenceCheck()
                 return false
             },
             readMigrationCredential: { _ in
-                calls.migrationReads += 1
+                calls.recordMigrationRead()
                 return nil
             },
             moveLegacyCredentialFile: { _, _ in
-                calls.fileMoves += 1
+                calls.recordFileMove()
             },
             makeStatusLineStore: {
                 ClaudeStatusLineUsageStore(fileURL: self.usageFile)
             },
-            powerMonitor: power
+            powerMonitor: power,
+            scheduleCLIDetection: scheduler.scheduleDelayed,
+            performCredentialWork: scheduler.scheduleCredentialWork
         )
     }
 }
 
 private final class CredentialCallRecorder {
-    var cliReads = 0
-    var keychainExistenceChecks = 0
-    var migrationReads = 0
-    var fileMoves = 0
+    private let lock = NSLock()
+    private var recordedCLIReads = 0
+    private var recordedKeychainExistenceChecks = 0
+    private var recordedMigrationReads = 0
+    private var recordedFileMoves = 0
+
+    var cliReads: Int {
+        withLock { recordedCLIReads }
+    }
 
     var total: Int {
-        cliReads + keychainExistenceChecks + migrationReads + fileMoves
+        withLock {
+            recordedCLIReads
+                + recordedKeychainExistenceChecks
+                + recordedMigrationReads
+                + recordedFileMoves
+        }
+    }
+
+    func recordCLIRead() {
+        withLock { recordedCLIReads += 1 }
+    }
+
+    func recordKeychainExistenceCheck() {
+        withLock { recordedKeychainExistenceChecks += 1 }
+    }
+
+    func recordMigrationRead() {
+        withLock { recordedMigrationReads += 1 }
+    }
+
+    func recordFileMove() {
+        withLock { recordedFileMoves += 1 }
+    }
+
+    private func withLock<T>(_ operation: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return operation()
     }
 }
 
@@ -187,4 +338,51 @@ private final class TestPowerStateMonitor: PowerStateMonitoring {
 
     func startMonitoring() {}
     func stopMonitoring() {}
+}
+
+private final class ControlledCredentialScheduler {
+    final class ScheduledOperation {
+        let operation: () -> Void
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        init(operation: @escaping () -> Void) {
+            self.operation = operation
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
+
+    private(set) var delayed: [ScheduledOperation] = []
+    private(set) var credentialWork: [ScheduledOperation] = []
+
+    func scheduleDelayed(_ operation: @escaping () -> Void) -> () -> Void {
+        let scheduled = ScheduledOperation(operation: operation)
+        delayed.append(scheduled)
+        return scheduled.cancel
+    }
+
+    func scheduleCredentialWork(_ operation: @escaping () -> Void) -> () -> Void {
+        let scheduled = ScheduledOperation(operation: operation)
+        credentialWork.append(scheduled)
+        return scheduled.cancel
+    }
+
+    func runDelayed(at index: Int) {
+        delayed[index].operation()
+    }
+
+    func runCredentialWork(at index: Int) {
+        credentialWork[index].operation()
+    }
 }

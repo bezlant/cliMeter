@@ -2,6 +2,24 @@ import Foundation
 import SwiftUI
 import Combine
 
+private final class ProviderGeneration {
+    private let lock = NSLock()
+    private var value: UInt64 = 0
+
+    func advance() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
+
+    func matches(_ candidate: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value == candidate
+    }
+}
+
 class ProfileManager: ObservableObject {
     @Published var profiles: [Profile] = []
     @Published var allUsageData: [UUID: UsageData] = [:]
@@ -13,10 +31,12 @@ class ProfileManager: ObservableObject {
     @Published var codexUsageData: UsageData?
     @Published var codexErrorMessage: String?
     @Published var codexLastSuccessAt: Date?
+    private var isInitializingClaudeSettings = true
     private static let readOnlyCredentialFileBackupDoneKey = "readOnlyMigrationDone"
     private static let readOnlyProfileMigrationDoneKey = "readOnlyProfileMigrationDone"
     @Published var claudeUsageSource: ClaudeUsageSource = .statusLineFile {
         didSet {
+            guard !isInitializingClaudeSettings else { return }
             guard claudeUsageSource != oldValue else { return }
             ProfileStore.saveClaudeUsageSource(claudeUsageSource, defaults: defaults)
             stopClaudeProvider()
@@ -33,18 +53,20 @@ class ProfileManager: ObservableObject {
     }
     @Published var claudeEnabled: Bool = true {
         didSet {
-            ProfileStore.saveClaudeEnabled(claudeEnabled)
+            guard !isInitializingClaudeSettings else { return }
+            ProfileStore.saveClaudeEnabled(claudeEnabled, defaults: defaults)
             if claudeEnabled {
                 refreshAuthenticatedIDs()
                 startClaudeProvider()
             } else {
                 stopClaudeProvider()
+                refreshAuthenticatedIDs()
             }
         }
     }
     @Published var codexEnabled: Bool = true {
         didSet {
-            ProfileStore.saveCodexEnabled(codexEnabled)
+            ProfileStore.saveCodexEnabled(codexEnabled, defaults: defaults)
             if codexEnabled {
                 codexCoordinator.startPolling()
             } else {
@@ -56,13 +78,19 @@ class ProfileManager: ObservableObject {
         }
     }
     @Published var peakHoursEnabled: Bool = true {
-        didSet { ProfileStore.savePeakHoursEnabled(peakHoursEnabled) }
+        didSet {
+            ProfileStore.savePeakHoursEnabled(peakHoursEnabled, defaults: defaults)
+        }
     }
     @Published var autoSwitchEnabled: Bool = false {
-        didSet { ProfileStore.saveAutoSwitchEnabled(autoSwitchEnabled) }
+        didSet {
+            ProfileStore.saveAutoSwitchEnabled(autoSwitchEnabled, defaults: defaults)
+        }
     }
     @Published var autoSwitchThreshold: Double = 95.0 {
-        didSet { ProfileStore.saveAutoSwitchThreshold(autoSwitchThreshold) }
+        didSet {
+            ProfileStore.saveAutoSwitchThreshold(autoSwitchThreshold, defaults: defaults)
+        }
     }
 
     private var coordinators: [UUID: UsageRefreshCoordinator] = [:]
@@ -81,6 +109,9 @@ class ProfileManager: ObservableObject {
     private var cliIdentificationTask: Task<Void, Never>?
     private var autoStartTask: Task<Void, Never>?
     private var backfillTasks: [Task<Void, Never>] = []
+    private let providerGeneration = ProviderGeneration()
+    private var cancelDelayedCLIDetection: (() -> Void)?
+    private var cancelCredentialWork: (() -> Void)?
 
     // Convenience for menu bar: usage data for CLI-active profile
     var cliActiveUsageData: UsageData? {
@@ -118,12 +149,13 @@ class ProfileManager: ObservableObject {
             performReadOnlyMigrationIfNeeded()
         }
         loadCLIActiveProfileID()
+        peakHoursEnabled = ProfileStore.loadPeakHoursEnabled(defaults: defaults)
+        autoSwitchEnabled = ProfileStore.loadAutoSwitchEnabled(defaults: defaults)
+        autoSwitchThreshold = ProfileStore.loadAutoSwitchThreshold(defaults: defaults)
+        codexEnabled = ProfileStore.loadCodexEnabled(defaults: defaults)
+        claudeEnabled = ProfileStore.loadClaudeEnabled(defaults: defaults)
+        isInitializingClaudeSettings = false
         refreshAuthenticatedIDs()
-        peakHoursEnabled = ProfileStore.loadPeakHoursEnabled()
-        autoSwitchEnabled = ProfileStore.loadAutoSwitchEnabled()
-        autoSwitchThreshold = ProfileStore.loadAutoSwitchThreshold()
-        codexEnabled = ProfileStore.loadCodexEnabled()
-        claudeEnabled = ProfileStore.loadClaudeEnabled()
         Log.profiles.info("init: \(self.profiles.count) profiles, \(self.authenticatedProfileIDs.count) authenticated, cliActive=\(self.cliActiveProfileID?.uuidString ?? "none")")
         if claudeEnabled {
             startClaudeProvider()
@@ -138,8 +170,8 @@ class ProfileManager: ObservableObject {
     private func refreshAuthenticatedIDs() {
         if claudeUsageSource == .statusLineFile {
             cachedCredentials = [:]
-            authenticatedProfileIDs = ProfileStore.authenticatedMarkers()
-            if let cliActiveProfileID {
+            authenticatedProfileIDs = ProfileStore.authenticatedMarkers(defaults: defaults)
+            if claudeEnabled, let cliActiveProfileID {
                 authenticatedProfileIDs.insert(cliActiveProfileID)
             }
             return
@@ -149,7 +181,7 @@ class ProfileManager: ObservableObject {
             profiles: profiles,
             existingCredentials: cachedCredentials,
             storedCredential: { ProfileStore.loadCredentialModel(for: $0) },
-            authenticatedMarkers: ProfileStore.authenticatedMarkers()
+            authenticatedMarkers: ProfileStore.authenticatedMarkers(defaults: defaults)
         )
         cachedCredentials = state.credentials
         authenticatedProfileIDs = state.authenticatedProfileIDs
@@ -171,7 +203,7 @@ class ProfileManager: ObservableObject {
         if Self.shouldPersistSecret(for: source) {
             try? ProfileStore.saveCredentialModel(cred, for: id)
         } else {
-            ProfileStore.saveAccountMetadata(cred, for: id)
+            ProfileStore.saveAccountMetadata(cred, for: id, defaults: defaults)
         }
     }
 
@@ -211,7 +243,7 @@ class ProfileManager: ObservableObject {
             return nil
         }
 
-        let expectedUUID = ProfileStore.accountUUID(for: profileID)
+        let expectedUUID = ProfileStore.accountUUID(for: profileID, defaults: defaults)
         if !Self.canUseCLICredential(
             credential,
             for: profileID,
@@ -240,11 +272,11 @@ class ProfileManager: ObservableObject {
     // MARK: - Initialization
 
     private func loadProfiles() {
-        profiles = ProfileStore.loadProfiles()
+        profiles = ProfileStore.loadProfiles(defaults: defaults)
         if profiles.isEmpty {
             let defaultProfile = Profile(name: "Default")
             profiles = [defaultProfile]
-            ProfileStore.saveProfiles(profiles)
+            ProfileStore.saveProfiles(profiles, defaults: defaults)
         }
     }
 
@@ -267,11 +299,19 @@ class ProfileManager: ObservableObject {
             profiles = Self.migrateProfilesToReadOnly(
                 profiles: profiles,
                 storedCredential: dependencies.readMigrationCredential,
-                saveMetadata: { credential, profileID in ProfileStore.saveAccountMetadata(credential, for: profileID) },
+                saveMetadata: { credential, profileID in
+                    ProfileStore.saveAccountMetadata(
+                        credential,
+                        for: profileID,
+                        defaults: self.defaults
+                    )
+                },
                 purgeSecret: { ProfileStore.deleteCredentialFromAllStores(for: $0) },
-                markAuthenticated: { ProfileStore.markAuthenticated($0) }
+                markAuthenticated: {
+                    ProfileStore.markAuthenticated($0, defaults: self.defaults)
+                }
             )
-            ProfileStore.saveProfiles(profiles)
+            ProfileStore.saveProfiles(profiles, defaults: defaults)
             defaults.set(true, forKey: Self.readOnlyProfileMigrationDoneKey)
         }
 
@@ -294,7 +334,7 @@ class ProfileManager: ObservableObject {
     }
 
     private func loadCLIActiveProfileID() {
-        if let savedID = ProfileStore.loadCLIActiveProfileID(),
+        if let savedID = ProfileStore.loadCLIActiveProfileID(defaults: defaults),
            profiles.contains(where: { $0.id == savedID }) {
             cliActiveProfileID = savedID
         } else if claudeUsageSource == .statusLineFile {
@@ -307,35 +347,78 @@ class ProfileManager: ObservableObject {
         if let cliActiveProfileID,
            profiles.contains(where: { $0.id == cliActiveProfileID }) {
             selectedID = cliActiveProfileID
-        } else if let savedID = ProfileStore.loadCLIActiveProfileID(),
+        } else if let savedID = ProfileStore.loadCLIActiveProfileID(defaults: defaults),
                   profiles.contains(where: { $0.id == savedID }) {
             selectedID = savedID
         } else {
             selectedID = profiles.first?.id
         }
         cliActiveProfileID = selectedID
-        ProfileStore.saveCLIActiveProfileID(selectedID)
+        ProfileStore.saveCLIActiveProfileID(selectedID, defaults: defaults)
     }
 
     // MARK: - CLI Account Detection
 
     private func startCLIMonitoring() {
-        // Initial check after short delay (gives backfill time)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard self?.claudeUsageSource == .keychainManual else { return }
-            self?.detectCLIAccountChange()
+        stopCLIMonitoring()
+        let generation = providerGeneration.advance()
+        cancelDelayedCLIDetection = dependencies.scheduleCLIDetection { [weak self] in
+            self?.runCLIDetectionOnMain(generation: generation)
         }
     }
 
     private func stopCLIMonitoring() {
+        _ = providerGeneration.advance()
+        cancelDelayedCLIDetection?()
+        cancelDelayedCLIDetection = nil
+        cancelCredentialWork?()
+        cancelCredentialWork = nil
     }
 
     private func detectCLIAccountChange() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.detectCLIAccountChange()
+            }
+            return
+        }
         guard claudeEnabled, claudeUsageSource == .keychainManual else { return }
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self, self.claudeUsageSource == .keychainManual else { return }
+
+        _ = providerGeneration.advance()
+        cancelDelayedCLIDetection?()
+        cancelDelayedCLIDetection = nil
+        cancelCredentialWork?()
+        cancelCredentialWork = nil
+        let generation = providerGeneration.advance()
+        scheduleCredentialRead(generation: generation)
+    }
+
+    private func runCLIDetectionOnMain(generation: UInt64) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.runCLIDetectionOnMain(generation: generation)
+            }
+            return
+        }
+        guard providerGeneration.matches(generation),
+              claudeEnabled,
+              claudeUsageSource == .keychainManual else { return }
+
+        cancelDelayedCLIDetection = nil
+        scheduleCredentialRead(generation: generation)
+    }
+
+    private func scheduleCredentialRead(generation: UInt64) {
+        cancelCredentialWork = dependencies.performCredentialWork { [weak self] in
+            guard let self,
+                  self.providerGeneration.matches(generation) else { return }
             let cliCredential = self.dependencies.readCLICredential(false)
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.providerGeneration.matches(generation),
+                      self.claudeEnabled,
+                      self.claudeUsageSource == .keychainManual else { return }
+                self.cancelCredentialWork = nil
                 self.processCLICredential(cliCredential)
             }
         }
@@ -389,7 +472,8 @@ class ProfileManager: ObservableObject {
 
         // Match by accountUUID
         for profile in profiles {
-            let accountUUID = cachedCredentials[profile.id]?.accountUUID ?? ProfileStore.accountUUID(for: profile.id)
+            let accountUUID = cachedCredentials[profile.id]?.accountUUID
+                ?? ProfileStore.accountUUID(for: profile.id, defaults: defaults)
             if accountUUID == apiProfile.uuid {
                 Log.profiles.info("detectCLI: matched existing profile '\(profile.name)'")
                 saveAndActivate(credential: credential, profileID: profile.id)
@@ -429,7 +513,7 @@ class ProfileManager: ObservableObject {
         } else {
             let newProfile = Profile(name: apiProfile.displayName)
             profiles.append(newProfile)
-            ProfileStore.saveProfiles(profiles)
+            ProfileStore.saveProfiles(profiles, defaults: defaults)
             Log.profiles.info("detectCLI: new account → created profile '\(apiProfile.displayName)'")
             saveAndActivate(credential: credential, profileID: newProfile.id)
         }
@@ -441,7 +525,7 @@ class ProfileManager: ObservableObject {
         refreshAuthenticatedIDs()
         if cliActiveProfileID != profileID {
             cliActiveProfileID = profileID
-            ProfileStore.saveCLIActiveProfileID(profileID)
+            ProfileStore.saveCLIActiveProfileID(profileID, defaults: defaults)
         }
         if coordinators[profileID] == nil {
             setupCoordinator(for: profileID)
@@ -848,7 +932,7 @@ class ProfileManager: ObservableObject {
                 teardownStatusLineStore()
             }
             cliActiveProfileID = profileID
-            ProfileStore.saveCLIActiveProfileID(profileID)
+            ProfileStore.saveCLIActiveProfileID(profileID, defaults: defaults)
             refreshAuthenticatedIDs()
             if profileChanged, claudeEnabled {
                 setupStatusLineStore()
@@ -857,7 +941,7 @@ class ProfileManager: ObservableObject {
         }
 
         cliActiveProfileID = profileID
-        ProfileStore.saveCLIActiveProfileID(profileID)
+        ProfileStore.saveCLIActiveProfileID(profileID, defaults: defaults)
     }
 
     func createProfile(name: String) {
@@ -866,7 +950,7 @@ class ProfileManager: ObservableObject {
 
         let newProfile = Profile(name: trimmed)
         profiles.append(newProfile)
-        ProfileStore.saveProfiles(profiles)
+        ProfileStore.saveProfiles(profiles, defaults: defaults)
     }
 
     func renameProfile(id: UUID, name: String) {
@@ -875,7 +959,7 @@ class ProfileManager: ObservableObject {
         guard let index = profiles.firstIndex(where: { $0.id == id }) else { return }
 
         profiles[index].name = trimmed
-        ProfileStore.saveProfiles(profiles)
+        ProfileStore.saveProfiles(profiles, defaults: defaults)
     }
 
     func deleteProfile(id: UUID) {
@@ -890,14 +974,14 @@ class ProfileManager: ObservableObject {
 
         if cliActiveProfileID == id {
             cliActiveProfileID = profiles.first(where: { $0.id != id })?.id
-            ProfileStore.saveCLIActiveProfileID(cliActiveProfileID)
+            ProfileStore.saveCLIActiveProfileID(cliActiveProfileID, defaults: defaults)
         }
 
         profiles.remove(at: index)
-        ProfileStore.saveProfiles(profiles)
+        ProfileStore.saveProfiles(profiles, defaults: defaults)
         ProfileStore.deleteCredentialFromAllStores(for: id)
-        ProfileStore.clearAccountMetadata(id)
-        ProfileStore.clearAuthenticated(id)
+        ProfileStore.clearAccountMetadata(id, defaults: defaults)
+        ProfileStore.clearAuthenticated(id, defaults: defaults)
         refreshAuthenticatedIDs()
         if claudeEnabled, claudeUsageSource == .statusLineFile {
             setupStatusLineStore()
@@ -907,12 +991,15 @@ class ProfileManager: ObservableObject {
     func removeCredential(for profileID: UUID) {
         teardownCoordinator(for: profileID)
         ProfileStore.deleteCredentialFromAllStores(for: profileID)
-        ProfileStore.clearAccountMetadata(profileID)
-        ProfileStore.clearAuthenticated(profileID)
+        ProfileStore.clearAccountMetadata(profileID, defaults: defaults)
+        ProfileStore.clearAuthenticated(profileID, defaults: defaults)
         refreshAuthenticatedIDs()
     }
 
     deinit {
+        _ = providerGeneration.advance()
+        cancelDelayedCLIDetection?()
+        cancelCredentialWork?()
         powerMonitor.stopMonitoring()
         statusLineStore?.stopPolling()
         coordinators.values.forEach { $0.stopPolling() }
