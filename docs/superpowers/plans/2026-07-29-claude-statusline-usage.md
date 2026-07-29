@@ -959,7 +959,22 @@ Expected: `** BUILD SUCCEEDED **`.
 
 - [ ] **Step 3: Install the exporter and update the existing status line**
 
-Back up the existing script once, install the reviewed exporter with mode `0700`, and add this call immediately after `input=$(cat)` without changing the current visible-output code:
+Preflight the existing script before changing it:
+
+1. Search for the exact exporter hook below.
+2. If the exact hook already exists once, do not add it again and do not create
+   another backup.
+3. If the hook is absent, identify whether a verified pre-install backup already
+   exists. Do not replace or duplicate an existing backup. Only when no backup
+   exists, create one recoverable sibling immediately before the first
+   modification, then verify its mode and byte equality with the active script
+   before patching.
+4. Stop if a partial/different Climeter hook exists; do not guess how to merge
+   it.
+
+Install the reviewed exporter with mode `0700`. Only when the exact hook is
+absent, add this call immediately after `input=$(cat)` without changing the
+current visible-output code:
 
 ```bash
 printf '%s' "$input" |
@@ -968,10 +983,23 @@ printf '%s' "$input" |
 ```
 
 Use `apply_patch` for the status-line edit. Do not read or copy any credential file.
+Afterward, assert the exact hook occurs once and compare the active script's
+visible output with the verified backup using a non-sensitive fixture.
 
 - [ ] **Step 4: Verify exporter behavior with a credential-canary fixture**
 
-Pipe a fixture containing fake token, transcript, and project fields plus valid rate limits through the installed status-line script. Confirm:
+Never send a canary fixture to the production aggregate. Create a private
+temporary directory and guarantee cleanup:
+
+```bash
+canary_dir=$(mktemp -d "${TMPDIR:-/tmp}/climeter-canary.XXXXXX")
+trap 'rm -rf "$canary_dir"' EXIT
+chmod 0700 "$canary_dir"
+```
+
+Pipe a fixture containing fake token, transcript, and project fields plus valid
+rate limits through the installed status-line script with
+`CLIMETER_USAGE_DIR="$canary_dir"`. Confirm only the isolated output:
 
 ```bash
 jq -e '
@@ -979,10 +1007,14 @@ jq -e '
   .schema_version == 1 and
   .rate_limits.five_hour.used_percentage == 23.5 and
   .rate_limits.seven_day.used_percentage == 41.2
-' "$HOME/Library/Application Support/Climeter/claude-usage.json"
+' "$canary_dir/claude-usage.json"
 ```
 
-Also confirm modes with `stat -f '%Lp %N'`. Expected: directory `700`, usage/exporter/lock files `600` or stricter executable exporter `700`, and no canary string in the usage file.
+Also confirm modes with `stat -f '%Lp %N'`. Expected: isolated directory
+`700`, isolated usage/lock files `600`, installed executable exporter `700`,
+and no canary string in the isolated usage file. Confirm the trap removes the
+temporary directory. Numeric fixture data must never be written to, merged
+into, restored over, or left in the production aggregate.
 
 - [ ] **Step 5: Install and launch the app**
 
@@ -994,10 +1026,21 @@ Record the current end of `~/Library/Logs/Climeter/climeter.log`, then exercise:
 
 1. app launch;
 2. manual refresh;
-3. one Claude Code response;
+3. passively observe one genuine Claude status-line write after installation;
 4. a sleep/wake-equivalent status store restart if practical.
 
-Assert the new log segment contains no `readCLICredential` or `keychainItemExists` entry, the menu-bar usage changes within five seconds of the status-line file update, and the app displays the file's `updated_at`-based stale state.
+Do not send an artificial Claude prompt: it consumes the user's quota and is
+unnecessary. Production aggregate validation must come only from a genuine
+status-line write produced by normal user activity. Assert its exact allowlist,
+valid window shapes, owner-only mode, and that the menu-bar usage changes
+within five seconds. If no genuine write occurs during the observation window,
+record that acceptance item as pending rather than fabricating production
+data.
+
+Assert the new log segment contains no `readCLICredential` or
+`keychainItemExists` entry. Verify `updated_at`-based stale behavior with the
+source-aware automated store/presentation tests; do not age or replace the
+production aggregate for a UI fixture.
 
 - [ ] **Step 7: Run final repository verification and commit any installation documentation**
 
