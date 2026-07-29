@@ -46,11 +46,15 @@ class ProfileManager: ObservableObject {
     private static let readOnlyCredentialFileBackupDoneKey = "readOnlyMigrationDone"
     private static let readOnlyProfileMigrationDoneKey = "readOnlyProfileMigrationDone"
     @Published var claudeUsageSource: ClaudeUsageSource = .statusLineFile {
+        willSet {
+            guard !isInitializingClaudeSettings else { return }
+            guard newValue != claudeUsageSource else { return }
+            stopClaudeProvider()
+        }
         didSet {
             guard !isInitializingClaudeSettings else { return }
             guard claudeUsageSource != oldValue else { return }
             ProfileStore.saveClaudeUsageSource(claudeUsageSource, defaults: defaults)
-            stopClaudeProvider()
             if claudeUsageSource == .keychainManual {
                 performReadOnlyMigrationIfNeeded()
             } else {
@@ -703,12 +707,6 @@ class ProfileManager: ObservableObject {
         statusLineStore?.stopPolling()
         statusLineCancellables.removeAll()
         statusLineStore = nil
-        if let profileID = statusLineProfileID {
-            allUsageData.removeValue(forKey: profileID)
-            allErrors.removeValue(forKey: profileID)
-            allLastSuccess.removeValue(forKey: profileID)
-            allStale.removeValue(forKey: profileID)
-        }
         statusLineProfileID = nil
     }
 
@@ -884,6 +882,9 @@ class ProfileManager: ObservableObject {
         coordinators[profileID]?.stopPolling()
         coordinators.removeValue(forKey: profileID)
         cancellables.removeValue(forKey: profileID)
+    }
+
+    private func clearPresentation(for profileID: UUID) {
         allUsageData.removeValue(forKey: profileID)
         allErrors.removeValue(forKey: profileID)
         allLastSuccess.removeValue(forKey: profileID)
@@ -984,6 +985,7 @@ class ProfileManager: ObservableObject {
         } else {
             teardownCoordinator(for: id)
         }
+        clearPresentation(for: id)
 
         if cliActiveProfileID == id {
             cliActiveProfileID = profiles.first(where: { $0.id != id })?.id
@@ -1003,6 +1005,7 @@ class ProfileManager: ObservableObject {
 
     func removeCredential(for profileID: UUID) {
         teardownCoordinator(for: profileID)
+        clearPresentation(for: profileID)
         ProfileStore.deleteCredentialFromAllStores(for: profileID)
         ProfileStore.clearAccountMetadata(profileID, defaults: defaults)
         ProfileStore.clearAuthenticated(profileID, defaults: defaults)

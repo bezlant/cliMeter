@@ -25,10 +25,9 @@ publish_locked() {
           if ($window | type) != "object" then null
           elif ($window.used_percentage | type) != "number" then null
           elif $window.used_percentage < 0 or $window.used_percentage > 100 then null
-          elif (
-            ($window | has("resets_at")) and
-            $window.resets_at != null and
-            ($window.resets_at | type) != "number"
+          elif $window.resets_at != null and (
+            ($window.resets_at | type) != "number" or
+            (($window.resets_at | isfinite) | not)
           ) then null
           else {
             used_percentage: $window.used_percentage,
@@ -124,7 +123,10 @@ printf '%s' "$input" | jq -e -c '
       (
         ($window | has("resets_at") | not) or
         $window.resets_at == null or
-        ($window.resets_at | type) == "number"
+        (
+          ($window.resets_at | type) == "number" and
+          ($window.resets_at | isfinite)
+        )
       )
     end;
 

@@ -158,6 +158,47 @@ final class ClaudeUsageExporterTests: XCTestCase {
         XCTAssertTrue(try temporaryExporterFiles(in: directory).isEmpty)
     }
 
+    func test_exporterRejectsIncomingInfiniteResetAndLaterFiniteWindowRecovers() throws {
+        try runExporter(input: completeFixture, directory: directory)
+        let original = try Data(contentsOf: usageFile)
+
+        try runExporter(
+            input: #"{"rate_limits":{"five_hour":{"used_percentage":99,"resets_at":1e999}}}"#,
+            directory: directory
+        )
+
+        XCTAssertEqual(try Data(contentsOf: usageFile), original)
+
+        try runExporter(input: newerFixture, directory: directory)
+
+        XCTAssertEqual(try decodedUsageFile().fiveHour.usedPercentage, 50)
+        XCTAssertEqual(try decodedUsageFile().fiveHour.resetsAt, 1_785_400_000)
+    }
+
+    func test_exporterDiscardsPersistedInfiniteResetAndAcceptsLaterFiniteWindow() throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let taintedAggregate = #"""
+        {
+          "schema_version":1,
+          "updated_at":1785290000,
+          "rate_limits":{
+            "five_hour":{"used_percentage":99,"resets_at":1e999},
+            "seven_day":{"used_percentage":40,"resets_at":1785800000}
+          }
+        }
+        """#
+        try Data(taintedAggregate.utf8).write(to: usageFile)
+
+        try runExporter(input: newerFixture, directory: directory)
+
+        XCTAssertEqual(try decodedUsageFile().fiveHour.usedPercentage, 50)
+        XCTAssertEqual(try decodedUsageFile().fiveHour.resetsAt, 1_785_400_000)
+        XCTAssertEqual(try decodedUsageFile().rateLimits.count, 2)
+    }
+
     func test_exporterGracefullyTimesOutOnBusyLockWithoutChangingLastAggregate() throws {
         try runExporter(input: completeFixture, directory: directory)
         let original = try Data(contentsOf: usageFile)

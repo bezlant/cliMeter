@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import Climeter
 
 final class ProfileManagerStatusLineSourceTests: XCTestCase {
@@ -165,16 +166,18 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
         XCTAssertTrue(manager.hasAnyAuthenticated)
     }
 
-    func test_disablingClaudeStopsFileRefreshUntilReenabled() throws {
+    func test_disablingClaudeStopsFileRefreshButRetainsPresentationUntilReenabled() throws {
         let manager = ProfileManager(dependencies: dependencies(), defaults: defaults)
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        let profileID = try XCTUnwrap(manager.cliActiveProfileID)
         XCTAssertEqual(manager.cliActiveUsageData?.fiveHour.utilization, 23.5)
 
         manager.claudeEnabled = false
         try writeUsage(fiveHour: 77, sevenDay: 88)
         manager.refresh()
         RunLoop.main.run(until: Date().addingTimeInterval(1.2))
-        XCTAssertNil(manager.cliActiveUsageData)
+        XCTAssertEqual(manager.cliActiveUsageData?.fiveHour.utilization, 23.5)
+        XCTAssertFalse(manager.authenticatedProfileIDs.contains(profileID))
 
         manager.claudeEnabled = true
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
@@ -182,7 +185,7 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
         XCTAssertEqual(manager.cliActiveUsageData?.sevenDay.utilization, 88)
     }
 
-    func test_keychainCompatibilityReadsOnlyAfterExplicitSelectionAndTearsDownFileSource() {
+    func test_keychainCompatibilityReadsOnlyAfterExplicitSelectionAndRetainsFilePresentation() {
         let calls = CredentialCallRecorder()
         let scheduler = ControlledCredentialScheduler()
         let manager = ProfileManager(
@@ -199,7 +202,7 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
 
         XCTAssertGreaterThan(calls.total, 0)
         XCTAssertGreaterThan(calls.cliReads, 0)
-        XCTAssertNil(manager.cliActiveUsageData)
+        XCTAssertEqual(manager.cliActiveUsageData?.fiveHour.utilization, 23.5)
         XCTAssertEqual(ProfileStore.loadClaudeUsageSource(defaults: defaults), .keychainManual)
     }
 
@@ -220,6 +223,83 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
 
         XCTAssertTrue(scheduler.credentialWork.isEmpty)
         XCTAssertEqual(calls.cliReads, 0)
+    }
+
+    func test_statusLinePublicationCannotEnterOldCredentialRead() {
+        let calls = CredentialCallRecorder()
+        let scheduler = ControlledCredentialScheduler()
+        ProfileStore.saveClaudeUsageSource(.keychainManual, defaults: defaults)
+        let manager = ProfileManager(
+            dependencies: dependencies(calls: calls, scheduler: scheduler),
+            defaults: defaults
+        )
+        scheduler.runDelayed(at: 0)
+        XCTAssertEqual(scheduler.credentialWork.count, 1)
+
+        var observedStatusLine = false
+        let sourceObservation = manager.$claudeUsageSource
+            .dropFirst()
+            .sink { source in
+                guard source == .statusLineFile else { return }
+                observedStatusLine = true
+                // @Published is the barrier before the property's didSet completes.
+                scheduler.runCredentialWork(at: 0)
+            }
+
+        manager.claudeUsageSource = .statusLineFile
+
+        XCTAssertTrue(observedStatusLine)
+        XCTAssertEqual(calls.cliReads, 0)
+        withExtendedLifetime(sourceObservation) {}
+    }
+
+    func test_statusLineProfileChangeRetainsPriorPresentationAndRoutesNextSnapshot() throws {
+        let first = Profile(name: "First")
+        let second = Profile(name: "Second")
+        ProfileStore.saveProfiles([first, second], defaults: defaults)
+        ProfileStore.saveCLIActiveProfileID(first.id, defaults: defaults)
+        let manager = ProfileManager(dependencies: dependencies(), defaults: defaults)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        XCTAssertEqual(manager.allUsageData[first.id]?.fiveHour.utilization, 23.5)
+        XCTAssertEqual(manager.allStale[first.id], true)
+
+        try writeUsage(fiveHour: 77, sevenDay: 88)
+        manager.activateForCLI(profileID: second.id)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        XCTAssertEqual(manager.allUsageData[first.id]?.fiveHour.utilization, 23.5)
+        XCTAssertEqual(
+            manager.allLastSuccess[first.id],
+            Date(timeIntervalSince1970: 1_785_290_000)
+        )
+        XCTAssertEqual(manager.allStale[first.id], true)
+        XCTAssertEqual(manager.allUsageData[second.id]?.fiveHour.utilization, 77)
+        XCTAssertEqual(manager.allUsageData[second.id]?.sevenDay.utilization, 88)
+        XCTAssertEqual(manager.cliActiveProfileID, second.id)
+        XCTAssertFalse(manager.authenticatedProfileIDs.contains(first.id))
+        XCTAssertTrue(manager.authenticatedProfileIDs.contains(second.id))
+
+        manager.claudeUsageSource = .keychainManual
+
+        XCTAssertEqual(manager.allUsageData[first.id]?.fiveHour.utilization, 23.5)
+        XCTAssertEqual(manager.allUsageData[second.id]?.fiveHour.utilization, 77)
+        XCTAssertFalse(manager.authenticatedProfileIDs.contains(first.id))
+        XCTAssertFalse(manager.authenticatedProfileIDs.contains(second.id))
+
+        manager.claudeUsageSource = .statusLineFile
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+
+        XCTAssertEqual(manager.allUsageData[first.id]?.fiveHour.utilization, 23.5)
+        XCTAssertEqual(manager.allUsageData[second.id]?.fiveHour.utilization, 77)
+        XCTAssertFalse(manager.authenticatedProfileIDs.contains(first.id))
+        XCTAssertTrue(manager.authenticatedProfileIDs.contains(second.id))
+
+        manager.deleteProfile(id: first.id)
+
+        XCTAssertNil(manager.allUsageData[first.id])
+        XCTAssertNil(manager.allLastSuccess[first.id])
+        XCTAssertNil(manager.allStale[first.id])
     }
 
     func test_rapidSourceTransitionsOnlyAllowNewestKeychainGenerationToRead() throws {

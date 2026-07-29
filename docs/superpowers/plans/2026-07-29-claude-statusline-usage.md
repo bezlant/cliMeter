@@ -983,23 +983,27 @@ printf '%s' "$input" |
 ```
 
 Use `apply_patch` for the status-line edit. Do not read or copy any credential file.
-Afterward, assert the exact hook occurs once and compare the active script's
-visible output with the verified backup using a non-sensitive fixture.
+Before any fixture is sent through the active hooked script, create one private
+verification directory and arrange its cleanup:
+
+```bash
+verification_dir=$(mktemp -d "${TMPDIR:-/tmp}/climeter-verification.XXXXXX")
+trap 'rm -rf "$verification_dir"' EXIT
+chmod 0700 "$verification_dir"
+```
+
+Afterward, assert the exact hook occurs once. Compare the active script's
+visible output with the verified backup using a non-sensitive fixture, passing
+`CLIMETER_USAGE_DIR="$verification_dir"` explicitly to both executions. Never
+execute the active hooked script with a fixture before this isolation exists.
 
 - [ ] **Step 4: Verify exporter behavior with a credential-canary fixture**
 
-Never send a canary fixture to the production aggregate. Create a private
-temporary directory and guarantee cleanup:
-
-```bash
-canary_dir=$(mktemp -d "${TMPDIR:-/tmp}/climeter-canary.XXXXXX")
-trap 'rm -rf "$canary_dir"' EXIT
-chmod 0700 "$canary_dir"
-```
-
-Pipe a fixture containing fake token, transcript, and project fields plus valid
-rate limits through the installed status-line script with
-`CLIMETER_USAGE_DIR="$canary_dir"`. Confirm only the isolated output:
+Never send a canary fixture to the production aggregate. Reuse the private
+`verification_dir` created before the visible-output comparison. Pipe a fixture
+containing fake token, transcript, and project fields plus valid rate limits
+through the installed status-line script with
+`CLIMETER_USAGE_DIR="$verification_dir"`. Confirm only the isolated output:
 
 ```bash
 jq -e '
@@ -1007,7 +1011,7 @@ jq -e '
   .schema_version == 1 and
   .rate_limits.five_hour.used_percentage == 23.5 and
   .rate_limits.seven_day.used_percentage == 41.2
-' "$canary_dir/claude-usage.json"
+' "$verification_dir/claude-usage.json"
 ```
 
 Also confirm modes with `stat -f '%Lp %N'`. Expected: isolated directory
