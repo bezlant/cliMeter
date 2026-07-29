@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 import Combine
 
-private final class ProviderGeneration {
+final class ProviderGeneration {
     private let lock = NSLock()
     private var value: UInt64 = 0
 
@@ -17,6 +17,17 @@ private final class ProviderGeneration {
         lock.lock()
         defer { lock.unlock() }
         return value == candidate
+    }
+
+    func perform(
+        ifCurrent candidate: UInt64,
+        _ operation: () -> Void
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard value == candidate else { return false }
+        operation()
+        return true
     }
 }
 
@@ -410,9 +421,11 @@ class ProfileManager: ObservableObject {
 
     private func scheduleCredentialRead(generation: UInt64) {
         cancelCredentialWork = dependencies.performCredentialWork { [weak self] in
-            guard let self,
-                  self.providerGeneration.matches(generation) else { return }
-            let cliCredential = self.dependencies.readCLICredential(false)
+            guard let self else { return }
+            var cliCredential: Credential?
+            guard self.providerGeneration.perform(ifCurrent: generation, {
+                cliCredential = self.dependencies.readCLICredential(false)
+            }) else { return }
             DispatchQueue.main.async { [weak self] in
                 guard let self,
                       self.providerGeneration.matches(generation),

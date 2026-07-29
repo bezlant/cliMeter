@@ -12,7 +12,9 @@ legacy Keychain/coordinator path is retained behind explicit
 The subsequent review findings were reproduced and resolved: provider work is
 now cancellable and generation-gated, injected managers route all
 `UserDefaults` state through their injected store, and the disabled Claude
-state closes the status-line authentication gate.
+state closes the status-line authentication gate. Generation authorization and
+credential-read initiation are synchronized atomically with provider
+invalidation.
 
 ## Hypothesis and evidence
 
@@ -101,6 +103,16 @@ production fix:
 - The final focused suite passed 11/11, including deliberate execution of a
   cancelled old-generation operation. GREEN log:
   `/tmp/climeter-task3-review-generation-green.log`.
+- A subsequent TOCTOU review found that `matches()` released its lock before
+  the credential dependency call began. A barrier regression was added first
+  and failed to compile on the missing atomic generation operation. RED log:
+  `/tmp/climeter-task3-review-toctou-red.log`.
+- `ProviderGeneration.perform(ifCurrent:)` now holds the same lock used by
+  `advance()` while it invokes the authorized credential operation. The
+  barrier test proves invalidation cannot finish between authorization and read
+  initiation, completes both sides without deadlock, and rejects a stale
+  generation without entering its operation. The focused suite passed 12/12.
+  GREEN log: `/tmp/climeter-task3-review-toctou-green.log`.
 
 ## Implementation
 
@@ -139,9 +151,10 @@ production fix:
 - Cancels tasks, timers, subscriptions, and coordinators when changing
   providers.
 - Tracks delayed detection and credential work cancellation handles and a
-  lock-protected monotonically increasing provider generation. The generation
-  is checked immediately before a credential dependency read and again on the
-  main queue immediately before processing its result.
+  lock-protected monotonically increasing provider generation. Generation
+  validation and credential dependency invocation execute in one critical
+  section shared with invalidation; the generation is checked again on the main
+  queue immediately before processing its result.
 - Keeps Claude source/enabled reads for provider dispatch on the main queue;
   background credential work observes only the thread-safe generation token.
 - Suppresses Claude source/enabled property-observer side effects during
@@ -175,13 +188,13 @@ xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-Result: 34/34 tests passed, zero failures.
+Result: 35/35 tests passed, zero failures.
 
-- `ProfileManagerStatusLineSourceTests`: 11/11
+- `ProfileManagerStatusLineSourceTests`: 12/12
 - `ProfileManagerMigrationTests`: 8/8
 - `UsageRefreshCoordinatorReadOnlyTests`: 15/15
 
-Selected-suite log: `/tmp/climeter-task3-review-selected.log`.
+Selected-suite log: `/tmp/climeter-task3-review-toctou-selected.log`.
 
 ### Full suite
 
@@ -193,15 +206,37 @@ xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-Result: 99/99 tests passed, zero failures.
+Result: 100/100 tests passed, zero failures.
 
-Full-suite log: `/tmp/climeter-task3-review-full.log`.
+Full-suite log: `/tmp/climeter-task3-review-toctou-full.log`.
+
+### Thread Sanitizer
+
+The focused 12-test suite also passed with Thread Sanitizer enabled, with no
+race diagnostics. Its clean rebuild emitted pre-existing unrelated warnings
+for the deprecated `kSecUseAuthenticationUIFail` constant, a duplicate linker
+rpath, and skipped App Intents metadata extraction:
+
+```bash
+xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
+  -destination 'platform=macOS' \
+  -only-testing:ClimeterTests/ProfileManagerStatusLineSourceTests \
+  -enableThreadSanitizer YES \
+  CODE_SIGNING_ALLOWED=NO
+```
+
+Thread Sanitizer log: `/tmp/climeter-task3-review-toctou-tsan.log`.
 
 ### Static inspection
 
 - `git diff --check`: clean.
 - All four project deployment-target entries remain `14.0`.
-- The final build/test log contains no compiler warnings.
+- The normal full-suite log contains no warning lines. The Thread Sanitizer
+  clean rebuild warnings are documented above; none originate in the TOCTOU
+  change.
+- The live credential-read implementation contains no synchronous main-queue
+  hop, and result publication remains an asynchronous main-queue operation
+  after the generation lock is released.
 - Status-line source tests remove only their unique suite domain; an isolation
   test proves injected manager operations leave sentinel standard preferences
   unchanged.
@@ -226,6 +261,10 @@ Full-suite log: `/tmp/climeter-task3-review-full.log`.
   `keychainManual -> statusLineFile` and rapid
   `keychainManual -> statusLineFile -> keychainManual` transitions; cancelled
   old generations cannot enqueue or perform a credential read.
+- TOCTOU boundary: an authorized read begins before invalidation can complete,
+  while an already-invalid generation cannot enter the credential operation.
+  The concurrent barrier test and focused Thread Sanitizer run complete without
+  deadlock or race diagnostics.
 - Disabled authentication gate: tested at persisted-disabled launch and across
   disable/re-enable transitions.
 - No automatic fallback: verified by code inspection.
@@ -244,7 +283,7 @@ Full-suite log: `/tmp/climeter-task3-review-full.log`.
 - A cross-review process was launched because the change affects credential and
   migration routing, but it exceeded the handoff window and was stopped without
   emitting findings; its result file reported only `Execution error` and its
-  stderr was empty. A later independent review produced the four concrete
-  findings documented above; all four were reproduced and fixed with focused
-  tests.
+  stderr was empty. Later independent review passes produced the initial four
+  findings and the subsequent TOCTOU finding documented above; each was
+  reproduced and fixed with focused tests.
 - No known implementation blocker remains.

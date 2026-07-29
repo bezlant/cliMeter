@@ -249,6 +249,67 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
         XCTAssertEqual(calls.cliReads, 1)
     }
 
+    func test_providerGenerationMakesReadAuthorizationAtomicWithInvalidation() {
+        let providerGeneration = ProviderGeneration()
+        let generation = providerGeneration.advance()
+        let atAuthorizationBoundary = DispatchSemaphore(value: 0)
+        let allowReadInitiation = DispatchSemaphore(value: 0)
+        let invalidationAttempted = DispatchSemaphore(value: 0)
+        let readInitiated = DispatchSemaphore(value: 0)
+        let authorizedWorkFinished = DispatchSemaphore(value: 0)
+        let invalidationFinished = DispatchSemaphore(value: 0)
+        let events = ConcurrentEventRecorder()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let authorized = providerGeneration.perform(ifCurrent: generation) {
+                events.record("authorized")
+                atAuthorizationBoundary.signal()
+                _ = allowReadInitiation.wait(timeout: .now() + 2)
+                events.record("read initiated")
+                readInitiated.signal()
+            }
+            if authorized {
+                authorizedWorkFinished.signal()
+            }
+        }
+
+        XCTAssertEqual(
+            atAuthorizationBoundary.wait(timeout: .now() + 2),
+            .success
+        )
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            invalidationAttempted.signal()
+            _ = providerGeneration.advance()
+            events.record("invalidation finished")
+            invalidationFinished.signal()
+        }
+
+        XCTAssertEqual(invalidationAttempted.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(
+            invalidationFinished.wait(timeout: .now() + 0.1),
+            .timedOut,
+            "Invalidation must not complete between authorization and read initiation"
+        )
+
+        allowReadInitiation.signal()
+
+        XCTAssertEqual(readInitiated.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(authorizedWorkFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(invalidationFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(
+            events.values,
+            ["authorized", "read initiated", "invalidation finished"]
+        )
+
+        var staleReadInitiated = false
+        let staleGenerationAuthorized = providerGeneration.perform(ifCurrent: generation) {
+            staleReadInitiated = true
+        }
+        XCTAssertFalse(staleGenerationAuthorized)
+        XCTAssertFalse(staleReadInitiated)
+    }
+
     private func writeUsage(fiveHour: Double, sevenDay: Double) throws {
         let json = """
         {"schema_version":1,"updated_at":1785290000,"rate_limits":{"five_hour":{"used_percentage":\(fiveHour),"resets_at":1785300000},"seven_day":{"used_percentage":\(sevenDay),"resets_at":1785800000}}}
@@ -284,6 +345,23 @@ final class ProfileManagerStatusLineSourceTests: XCTestCase {
             scheduleCLIDetection: scheduler.scheduleDelayed,
             performCredentialWork: scheduler.scheduleCredentialWork
         )
+    }
+}
+
+private final class ConcurrentEventRecorder {
+    private let lock = NSLock()
+    private var recordedValues: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedValues
+    }
+
+    func record(_ value: String) {
+        lock.lock()
+        recordedValues.append(value)
+        lock.unlock()
     }
 }
 
