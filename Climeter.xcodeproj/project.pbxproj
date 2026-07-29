@@ -47,6 +47,7 @@
 		1A600001000000000000001 /* CLICredentialPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A600002000000000000002 /* CLICredentialPolicyTests.swift */; };
 		1A600005000000000000005 /* UsageRefreshCoordinatorReadOnlyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */; };
 		1A700003000000000000003 /* ClaudeStatusLineUsageStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A700004000000000000004 /* ClaudeStatusLineUsageStoreTests.swift */; };
+		1A700005000000000000005 /* ClaudeUsageExporterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A700006000000000000006 /* ClaudeUsageExporterTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -103,6 +104,7 @@
 		1A600002000000000000002 /* CLICredentialPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLICredentialPolicyTests.swift; sourceTree = "<group>"; };
 		1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageRefreshCoordinatorReadOnlyTests.swift; sourceTree = "<group>"; };
 		1A700004000000000000004 /* ClaudeStatusLineUsageStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeStatusLineUsageStoreTests.swift; sourceTree = "<group>"; };
+		1A700006000000000000006 /* ClaudeUsageExporterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeUsageExporterTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -192,6 +194,7 @@
 				1A600002000000000000002 /* CLICredentialPolicyTests.swift */,
 				1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */,
 				1A700004000000000000004 /* ClaudeStatusLineUsageStoreTests.swift */,
+				1A700006000000000000006 /* ClaudeUsageExporterTests.swift */,
 			);
 			path = ClimeterTests;
 			sourceTree = "<group>";
@@ -333,6 +336,7 @@
 				1A600001000000000000001 /* CLICredentialPolicyTests.swift in Sources */,
 				1A600005000000000000005 /* UsageRefreshCoordinatorReadOnlyTests.swift in Sources */,
 				1A700003000000000000003 /* ClaudeStatusLineUsageStoreTests.swift in Sources */,
+				1A700005000000000000005 /* ClaudeUsageExporterTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
