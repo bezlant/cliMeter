@@ -7,6 +7,7 @@ enum ProfileStore {
     private static let autoSwitchEnabledKey = "autoSwitchEnabled"
     private static let autoSwitchThresholdKey = "autoSwitchThreshold"
     private static let claudeEnabledKey = "claudeEnabled"
+    private static let claudeUsageSourceKey = "claudeUsageSource"
     private static let codexEnabledKey = "codexEnabled"
     private static let peakHoursEnabledKey = "peakHoursEnabled"
     private static let accountMetaKey = "accountMeta"
@@ -90,6 +91,23 @@ enum ProfileStore {
 
     static func saveClaudeEnabled(_ enabled: Bool) {
         defaults.set(enabled, forKey: claudeEnabledKey)
+    }
+
+    static func loadClaudeUsageSource(
+        defaults: UserDefaults = .standard
+    ) -> ClaudeUsageSource {
+        guard let rawValue = defaults.string(forKey: claudeUsageSourceKey),
+              let source = ClaudeUsageSource(rawValue: rawValue) else {
+            return .statusLineFile
+        }
+        return source
+    }
+
+    static func saveClaudeUsageSource(
+        _ source: ClaudeUsageSource,
+        defaults: UserDefaults = .standard
+    ) {
+        defaults.set(source.rawValue, forKey: claudeUsageSourceKey)
     }
 
     // MARK: - Peak Hours Settings

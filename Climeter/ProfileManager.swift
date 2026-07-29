@@ -15,25 +15,30 @@ class ProfileManager: ObservableObject {
     @Published var codexLastSuccessAt: Date?
     private static let readOnlyCredentialFileBackupDoneKey = "readOnlyMigrationDone"
     private static let readOnlyProfileMigrationDoneKey = "readOnlyProfileMigrationDone"
+    @Published var claudeUsageSource: ClaudeUsageSource = .statusLineFile {
+        didSet {
+            guard claudeUsageSource != oldValue else { return }
+            ProfileStore.saveClaudeUsageSource(claudeUsageSource, defaults: defaults)
+            stopClaudeProvider()
+            if claudeUsageSource == .keychainManual {
+                performReadOnlyMigrationIfNeeded()
+            } else {
+                selectStatusLineProfile()
+            }
+            refreshAuthenticatedIDs()
+            if claudeEnabled {
+                startClaudeProvider()
+            }
+        }
+    }
     @Published var claudeEnabled: Bool = true {
         didSet {
             ProfileStore.saveClaudeEnabled(claudeEnabled)
             if claudeEnabled {
                 refreshAuthenticatedIDs()
-                setupAllCoordinators()
-                backfillAccountUUIDs()
-                startCLIMonitoring()
+                startClaudeProvider()
             } else {
-                stopCLIMonitoring()
-                cliIdentificationTask?.cancel()
-                cliIdentificationTask = nil
-                autoStartTask?.cancel()
-                autoStartTask = nil
-                backfillTasks.forEach { $0.cancel() }
-                backfillTasks.removeAll()
-                for profileID in Array(coordinators.keys) {
-                    teardownCoordinator(for: profileID)
-                }
+                stopClaudeProvider()
             }
         }
     }
@@ -62,11 +67,16 @@ class ProfileManager: ObservableObject {
 
     private var coordinators: [UUID: UsageRefreshCoordinator] = [:]
     private var cancellables: [UUID: [AnyCancellable]] = [:]
+    private var statusLineStore: ClaudeStatusLineUsageStore?
+    private var statusLineProfileID: UUID?
+    private var statusLineCancellables: [AnyCancellable] = []
     private let codexCoordinator = CodexUsageRefreshCoordinator()
     private var codexCancellables: [AnyCancellable] = []
     private var cachedCredentials: [UUID: Credential] = [:]
     private var lastAutoSwitchDate: Date?
-    private let powerMonitor = PowerStateMonitor()
+    private let dependencies: ProfileManagerDependencies
+    private let defaults: UserDefaults
+    private let powerMonitor: any PowerStateMonitoring
     private var hasResumedSinceLastSleep = false
     private var cliIdentificationTask: Task<Void, Never>?
     private var autoStartTask: Task<Void, Never>?
@@ -91,11 +101,24 @@ class ProfileManager: ObservableObject {
         profiles.filter { authenticatedProfileIDs.contains($0.id) }
     }
 
-    init() {
+    convenience init() {
+        self.init(dependencies: .live, defaults: .standard)
+    }
+
+    init(
+        dependencies: ProfileManagerDependencies,
+        defaults: UserDefaults = .standard
+    ) {
+        self.dependencies = dependencies
+        self.defaults = defaults
+        powerMonitor = dependencies.powerMonitor
+        claudeUsageSource = ProfileStore.loadClaudeUsageSource(defaults: defaults)
         loadProfiles()
-        performReadOnlyMigrationIfNeeded()
-        refreshAuthenticatedIDs()
+        if claudeUsageSource == .keychainManual {
+            performReadOnlyMigrationIfNeeded()
+        }
         loadCLIActiveProfileID()
+        refreshAuthenticatedIDs()
         peakHoursEnabled = ProfileStore.loadPeakHoursEnabled()
         autoSwitchEnabled = ProfileStore.loadAutoSwitchEnabled()
         autoSwitchThreshold = ProfileStore.loadAutoSwitchThreshold()
@@ -103,9 +126,7 @@ class ProfileManager: ObservableObject {
         claudeEnabled = ProfileStore.loadClaudeEnabled()
         Log.profiles.info("init: \(self.profiles.count) profiles, \(self.authenticatedProfileIDs.count) authenticated, cliActive=\(self.cliActiveProfileID?.uuidString ?? "none")")
         if claudeEnabled {
-            setupAllCoordinators()
-            backfillAccountUUIDs()
-            startCLIMonitoring()
+            startClaudeProvider()
         }
         setupCodexCoordinator()
         if codexEnabled {
@@ -115,6 +136,15 @@ class ProfileManager: ObservableObject {
     }
 
     private func refreshAuthenticatedIDs() {
+        if claudeUsageSource == .statusLineFile {
+            cachedCredentials = [:]
+            authenticatedProfileIDs = ProfileStore.authenticatedMarkers()
+            if let cliActiveProfileID {
+                authenticatedProfileIDs.insert(cliActiveProfileID)
+            }
+            return
+        }
+
         let state = Self.computeAuthenticationState(
             profiles: profiles,
             existingCredentials: cachedCredentials,
@@ -176,7 +206,8 @@ class ProfileManager: ObservableObject {
     }
 
     private func readCLICredential(for profileID: UUID) -> Credential? {
-        guard let credential = ClaudeCodeSyncService.readCLICredential(interactive: false) else {
+        guard claudeUsageSource == .keychainManual,
+              let credential = dependencies.readCLICredential(false) else {
             return nil
         }
 
@@ -218,7 +249,6 @@ class ProfileManager: ObservableObject {
     }
 
     private func performReadOnlyMigrationIfNeeded() {
-        let defaults = UserDefaults.standard
         let legacyMigrationDone = defaults.bool(forKey: Self.readOnlyCredentialFileBackupDoneKey)
         let profileMigrationDone = defaults.bool(forKey: Self.readOnlyProfileMigrationDoneKey)
         let migrationPlan = Self.readOnlyMigrationPlan(
@@ -231,12 +261,12 @@ class ProfileManager: ObservableObject {
         let credentialFileName = ".credentials" + ".json"
         let fileURL = claudeDir.appendingPathComponent(credentialFileName)
         let backupURL = claudeDir.appendingPathComponent("\(credentialFileName).climeter-bak")
-        let keychainExists = ClaudeCodeSyncService.keychainItemExists()
+        let keychainExists = dependencies.keychainItemExists()
 
         if migrationPlan.runProfileMigration {
             profiles = Self.migrateProfilesToReadOnly(
                 profiles: profiles,
-                storedCredential: { Self.readOnlyMigrationCredential(for: $0) },
+                storedCredential: dependencies.readMigrationCredential,
                 saveMetadata: { credential, profileID in ProfileStore.saveAccountMetadata(credential, for: profileID) },
                 purgeSecret: { ProfileStore.deleteCredentialFromAllStores(for: $0) },
                 markAuthenticated: { ProfileStore.markAuthenticated($0) }
@@ -252,12 +282,7 @@ class ProfileManager: ObservableObject {
             fileURL: fileURL,
             backupURL: backupURL,
             fileExists: { FileManager.default.fileExists(atPath: $0.path) },
-            moveFile: { source, destination in
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try? FileManager.default.removeItem(at: destination)
-                }
-                try? FileManager.default.moveItem(at: source, to: destination)
-            }
+            moveFile: dependencies.moveLegacyCredentialFile
         )
         if !FileManager.default.fileExists(atPath: fileURL.path) {
             defaults.set(true, forKey: Self.readOnlyCredentialFileBackupDoneKey)
@@ -272,7 +297,24 @@ class ProfileManager: ObservableObject {
         if let savedID = ProfileStore.loadCLIActiveProfileID(),
            profiles.contains(where: { $0.id == savedID }) {
             cliActiveProfileID = savedID
+        } else if claudeUsageSource == .statusLineFile {
+            selectStatusLineProfile()
         }
+    }
+
+    private func selectStatusLineProfile() {
+        let selectedID: UUID?
+        if let cliActiveProfileID,
+           profiles.contains(where: { $0.id == cliActiveProfileID }) {
+            selectedID = cliActiveProfileID
+        } else if let savedID = ProfileStore.loadCLIActiveProfileID(),
+                  profiles.contains(where: { $0.id == savedID }) {
+            selectedID = savedID
+        } else {
+            selectedID = profiles.first?.id
+        }
+        cliActiveProfileID = selectedID
+        ProfileStore.saveCLIActiveProfileID(selectedID)
     }
 
     // MARK: - CLI Account Detection
@@ -280,6 +322,7 @@ class ProfileManager: ObservableObject {
     private func startCLIMonitoring() {
         // Initial check after short delay (gives backfill time)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard self?.claudeUsageSource == .keychainManual else { return }
             self?.detectCLIAccountChange()
         }
     }
@@ -288,17 +331,20 @@ class ProfileManager: ObservableObject {
     }
 
     private func detectCLIAccountChange() {
-        guard claudeEnabled else { return }
+        guard claudeEnabled, claudeUsageSource == .keychainManual else { return }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let cliCredential = ClaudeCodeSyncService.readCLICredential(interactive: false)
+            guard let self, self.claudeUsageSource == .keychainManual else { return }
+            let cliCredential = self.dependencies.readCLICredential(false)
             DispatchQueue.main.async {
-                self?.processCLICredential(cliCredential)
+                self.processCLICredential(cliCredential)
             }
         }
     }
 
     private func processCLICredential(_ cliCredential: Credential?) {
-        guard claudeEnabled, let cliCredential else { return }
+        guard claudeEnabled,
+              claudeUsageSource == .keychainManual,
+              let cliCredential else { return }
 
         cliIdentificationTask?.cancel()
 
@@ -320,17 +366,23 @@ class ProfileManager: ObservableObject {
 
     @MainActor
     private func identifyAndSyncAccount(_ cliCredential: Credential) async {
-        guard claudeEnabled, !Task.isCancelled else { return }
+        guard claudeEnabled,
+              claudeUsageSource == .keychainManual,
+              !Task.isCancelled else { return }
         var credential = cliCredential
 
-        guard claudeEnabled, !Task.isCancelled else { return }
+        guard claudeEnabled,
+              claudeUsageSource == .keychainManual,
+              !Task.isCancelled else { return }
 
         guard let apiProfile = try? await ClaudeAPIService.fetchProfile(credential: credential) else {
             Log.profiles.warning("detectCLI: fetchProfile failed")
             return
         }
 
-        guard claudeEnabled, !Task.isCancelled else { return }
+        guard claudeEnabled,
+              claudeUsageSource == .keychainManual,
+              !Task.isCancelled else { return }
 
         credential.accountUUID = apiProfile.uuid
         Log.profiles.info("detectCLI: account=\(apiProfile.uuid) name=\(apiProfile.displayName)")
@@ -351,7 +403,9 @@ class ProfileManager: ObservableObject {
                   stored.accountUUID == nil else { continue }
             Log.profiles.info("detectCLI: resolving accountUUID for '\(profile.name)'...")
             let storedProfile = try? await ClaudeAPIService.fetchProfile(credential: stored)
-            guard claudeEnabled, !Task.isCancelled else { return }
+            guard claudeEnabled,
+                  claudeUsageSource == .keychainManual,
+                  !Task.isCancelled else { return }
             if let storedProfile {
                 var updated = stored
                 updated.accountUUID = storedProfile.uuid
@@ -364,7 +418,9 @@ class ProfileManager: ObservableObject {
             }
         }
 
-        guard claudeEnabled, !Task.isCancelled else { return }
+        guard claudeEnabled,
+              claudeUsageSource == .keychainManual,
+              !Task.isCancelled else { return }
 
         // New account — assign to first unauthenticated profile or create one
         if let target = profiles.first(where: { !authenticatedProfileIDs.contains($0.id) }) {
@@ -380,7 +436,7 @@ class ProfileManager: ObservableObject {
     }
 
     private func saveAndActivate(credential: Credential, profileID: UUID) {
-        guard claudeEnabled else { return }
+        guard claudeEnabled, claudeUsageSource == .keychainManual else { return }
         persistCredential(credential, for: profileID)
         refreshAuthenticatedIDs()
         if cliActiveProfileID != profileID {
@@ -394,6 +450,7 @@ class ProfileManager: ObservableObject {
 
     /// Backfill accountUUID for profiles that were created before account detection
     private func backfillAccountUUIDs() {
+        guard claudeUsageSource == .keychainManual else { return }
         let needsBackfill = profiles.filter { p in
             guard let cred = cachedCredentials[p.id] else { return false }
             return cred.accountUUID == nil
@@ -412,7 +469,9 @@ class ProfileManager: ObservableObject {
                 }
                 guard !Task.isCancelled else { return }
                 await MainActor.run {
-                    guard self.claudeEnabled, !Task.isCancelled else { return }
+                    guard self.claudeEnabled,
+                          self.claudeUsageSource == .keychainManual,
+                          !Task.isCancelled else { return }
                     var updated = self.cachedCredentials[profile.id] ?? credential
                     updated.accountUUID = apiProfile.uuid
                     self.persistCredential(updated, for: profile.id)
@@ -477,10 +536,90 @@ class ProfileManager: ObservableObject {
         )
     }
 
+    private func startClaudeProvider() {
+        switch claudeUsageSource {
+        case .statusLineFile:
+            selectStatusLineProfile()
+            refreshAuthenticatedIDs()
+            setupStatusLineStore()
+        case .keychainManual:
+            setupAllCoordinators()
+            backfillAccountUUIDs()
+            startCLIMonitoring()
+        }
+    }
+
+    private func stopClaudeProvider() {
+        stopCLIMonitoring()
+        cliIdentificationTask?.cancel()
+        cliIdentificationTask = nil
+        autoStartTask?.cancel()
+        autoStartTask = nil
+        backfillTasks.forEach { $0.cancel() }
+        backfillTasks.removeAll()
+        teardownStatusLineStore()
+        for profileID in Array(coordinators.keys) {
+            teardownCoordinator(for: profileID)
+        }
+    }
+
+    private func setupStatusLineStore() {
+        guard claudeUsageSource == .statusLineFile,
+              claudeEnabled,
+              let profileID = cliActiveProfileID else { return }
+
+        if statusLineStore != nil, statusLineProfileID == profileID {
+            statusLineStore?.startPolling()
+            return
+        }
+
+        teardownStatusLineStore()
+        let store = dependencies.makeStatusLineStore()
+        statusLineStore = store
+        statusLineProfileID = profileID
+        statusLineCancellables = [
+            store.$usageData
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] data in
+                    self?.allUsageData[profileID] = data
+                },
+            store.$errorMessage
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] message in
+                    self?.allErrors[profileID] = message
+                },
+            store.$lastSuccessAt
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] date in
+                    self?.allLastSuccess[profileID] = date
+                },
+            store.$isStale
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] isStale in
+                    self?.allStale[profileID] = isStale
+                }
+        ]
+        store.startPolling()
+    }
+
+    private func teardownStatusLineStore() {
+        statusLineStore?.stopPolling()
+        statusLineCancellables.removeAll()
+        statusLineStore = nil
+        if let profileID = statusLineProfileID {
+            allUsageData.removeValue(forKey: profileID)
+            allErrors.removeValue(forKey: profileID)
+            allLastSuccess.removeValue(forKey: profileID)
+            allStale.removeValue(forKey: profileID)
+        }
+        statusLineProfileID = nil
+    }
+
     private func setupPowerMonitor() {
         powerMonitor.onSleep = { [weak self] in
             guard let self else { return }
             self.hasResumedSinceLastSleep = false
+            self.statusLineStore?.stopPolling()
             for coordinator in self.coordinators.values {
                 coordinator.stopPolling()
             }
@@ -493,6 +632,9 @@ class ProfileManager: ObservableObject {
             // not required (e.g. no password after sleep), wake
             // alone is enough — schedule a delayed retry.
             guard let self else { return }
+            if self.claudeEnabled, self.claudeUsageSource == .statusLineFile {
+                self.statusLineStore?.startPolling()
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 guard let self, !self.powerMonitor.isScreenLocked else { return }
                 self.resumeAfterWake()
@@ -509,21 +651,26 @@ class ProfileManager: ObservableObject {
     private func resumeAfterWake() {
         guard !hasResumedSinceLastSleep else { return }
         hasResumedSinceLastSleep = true
-        Log.profiles.info("resumeAfterWake: re-reading keychain and restarting coordinators")
 
         if claudeEnabled {
-            refreshAuthenticatedIDs()
-            Log.profiles.info("resumeAfterWake: \(self.authenticatedProfileIDs.count) authenticated")
+            switch claudeUsageSource {
+            case .statusLineFile:
+                statusLineStore?.startPolling()
+            case .keychainManual:
+                Log.profiles.info("resumeAfterWake: re-reading keychain and restarting coordinators")
+                refreshAuthenticatedIDs()
+                Log.profiles.info("resumeAfterWake: \(self.authenticatedProfileIDs.count) authenticated")
 
-            for profile in profiles where authenticatedProfileIDs.contains(profile.id) {
-                if coordinators[profile.id] == nil {
-                    setupCoordinator(for: profile.id)
-                } else {
-                    coordinators[profile.id]?.startPolling()
+                for profile in profiles where authenticatedProfileIDs.contains(profile.id) {
+                    if coordinators[profile.id] == nil {
+                        setupCoordinator(for: profile.id)
+                    } else {
+                        coordinators[profile.id]?.startPolling()
+                    }
                 }
-            }
 
-            detectCLIAccountChange()
+                detectCLIAccountChange()
+            }
         }
 
         if codexEnabled {
@@ -534,6 +681,7 @@ class ProfileManager: ObservableObject {
     // MARK: - Usage Coordinators
 
     private func setupAllCoordinators() {
+        guard claudeUsageSource == .keychainManual else { return }
         for profile in profiles where authenticatedProfileIDs.contains(profile.id) {
             setupCoordinator(for: profile.id)
         }
@@ -555,7 +703,8 @@ class ProfileManager: ObservableObject {
 
     private func setupCoordinator(for profileID: UUID) {
         // Don't create duplicates
-        guard coordinators[profileID] == nil else { return }
+        guard claudeUsageSource == .keychainManual,
+              coordinators[profileID] == nil else { return }
         Log.profiles.info("setupCoordinator for \(profileID)")
 
         let source = profiles.first { $0.id == profileID }?.credentialSource ?? .cliSynced
@@ -573,6 +722,7 @@ class ProfileManager: ObservableObject {
                 },
                 onAutoStart: { [weak self] credential in
                     guard let self, self.claudeEnabled,
+                          self.claudeUsageSource == .keychainManual,
                           self.cliActiveProfileID == profileID else { return }
                     self.autoStartTask?.cancel()
                     self.autoStartTask = Task {
@@ -586,12 +736,14 @@ class ProfileManager: ObservableObject {
                 readOnly: false,
                 credentialProvider: { [weak self] in self?.cachedCredentials[profileID] },
                 onCredentialRefreshed: { [weak self] refreshed in
-                    guard self?.claudeEnabled == true else { return }
+                    guard self?.claudeEnabled == true,
+                          self?.claudeUsageSource == .keychainManual else { return }
                     self?.cachedCredentials[profileID] = refreshed
                     try? ProfileStore.saveCredentialModel(refreshed, for: profileID)
                 },
                 onAutoStart: { [weak self] credential in
                     guard let self, self.claudeEnabled,
+                          self.claudeUsageSource == .keychainManual,
                           self.cliActiveProfileID == profileID else { return }
                     self.autoStartTask?.cancel()
                     self.autoStartTask = Task {
@@ -645,6 +797,7 @@ class ProfileManager: ObservableObject {
 
     private func checkAutoSwitch() {
         guard claudeEnabled,
+              claudeUsageSource == .keychainManual,
               autoSwitchEnabled,
               let activeID = cliActiveProfileID,
               let activeData = allUsageData[activeID],
@@ -671,8 +824,13 @@ class ProfileManager: ObservableObject {
 
     func refresh() {
         if claudeEnabled {
-            for coordinator in coordinators.values {
-                coordinator.refresh(forceKeychainReread: true)
+            switch claudeUsageSource {
+            case .statusLineFile:
+                statusLineStore?.refresh()
+            case .keychainManual:
+                for coordinator in coordinators.values {
+                    coordinator.refresh(forceKeychainReread: true)
+                }
             }
         }
         if codexEnabled {
@@ -683,6 +841,21 @@ class ProfileManager: ObservableObject {
     func activateForCLI(profileID: UUID) {
         // Climeter no longer switches Claude Code's active account. Switch
         // accounts inside Claude Code; Climeter follows via CLI monitoring.
+        if claudeUsageSource == .statusLineFile {
+            guard profiles.contains(where: { $0.id == profileID }) else { return }
+            let profileChanged = cliActiveProfileID != profileID
+            if profileChanged {
+                teardownStatusLineStore()
+            }
+            cliActiveProfileID = profileID
+            ProfileStore.saveCLIActiveProfileID(profileID)
+            refreshAuthenticatedIDs()
+            if profileChanged, claudeEnabled {
+                setupStatusLineStore()
+            }
+            return
+        }
+
         cliActiveProfileID = profileID
         ProfileStore.saveCLIActiveProfileID(profileID)
     }
@@ -709,7 +882,11 @@ class ProfileManager: ObservableObject {
         guard profiles.count > 1 else { return }
         guard let index = profiles.firstIndex(where: { $0.id == id }) else { return }
 
-        teardownCoordinator(for: id)
+        if statusLineProfileID == id {
+            teardownStatusLineStore()
+        } else {
+            teardownCoordinator(for: id)
+        }
 
         if cliActiveProfileID == id {
             cliActiveProfileID = profiles.first(where: { $0.id != id })?.id
@@ -722,6 +899,9 @@ class ProfileManager: ObservableObject {
         ProfileStore.clearAccountMetadata(id)
         ProfileStore.clearAuthenticated(id)
         refreshAuthenticatedIDs()
+        if claudeEnabled, claudeUsageSource == .statusLineFile {
+            setupStatusLineStore()
+        }
     }
 
     func removeCredential(for profileID: UUID) {
@@ -733,10 +913,9 @@ class ProfileManager: ObservableObject {
     }
 
     deinit {
-        stopCLIMonitoring()
-        for coordinator in coordinators.values {
-            coordinator.stopPolling()
-        }
+        powerMonitor.stopMonitoring()
+        statusLineStore?.stopPolling()
+        coordinators.values.forEach { $0.stopPolling() }
         codexCoordinator.stopPolling()
     }
 }

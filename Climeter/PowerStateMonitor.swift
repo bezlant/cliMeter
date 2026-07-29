@@ -1,7 +1,17 @@
 import AppKit
 import Foundation
 
-final class PowerStateMonitor: ObservableObject {
+protocol PowerStateMonitoring: AnyObject {
+    var isScreenLocked: Bool { get }
+    var onSleep: (() -> Void)? { get set }
+    var onWake: (() -> Void)? { get set }
+    var onScreenUnlocked: (() -> Void)? { get set }
+
+    func startMonitoring()
+    func stopMonitoring()
+}
+
+final class PowerStateMonitor: ObservableObject, PowerStateMonitoring {
     @Published private(set) var isSystemAwake = true
     @Published private(set) var isScreenLocked = false
 
