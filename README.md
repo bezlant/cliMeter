@@ -20,9 +20,10 @@ Claude Code and Codex do not keep their usage limits visible while you work. You
 
 - **Menu bar progress bar** — color-coded (green/orange/red) so you know at a glance
 - **Session + weekly tracking** — see both the 5-hour session and 7-day usage windows
-- **Claude multi-account support** — follows the active Claude Code account and preserves known profiles
+- **Password-free Claude usage** — reads sanitized rate-limit data from Claude Code's status line
+- **Keychain compatibility mode** — optional legacy multi-account support when explicitly selected
 - **Codex usage tracking** — shows OpenAI Codex session and weekly plan-limit windows
-- **CLI sync** — picks up Claude Code `/login` credentials and Codex CLI login state
+- **Codex CLI sync** — picks up the Codex CLI login state automatically
 - **Peak hours indicator** — shows when Claude rate limits are tighter (5–11 AM PT, weekdays) with countdown in your local timezone
 - **Per-provider toggles** — show or hide Claude and Codex independently
 - **Auto-update check** — notifies you when a new version is available
@@ -58,17 +59,42 @@ New versions are published automatically — the Homebrew cask updates on every 
 
 ## Setup
 
-1. Open cliMeter — it appears in your menu bar
-2. For Claude usage, run `/login` in Claude Code
-3. For Codex usage, run `codex login`
-4. cliMeter detects the credentials automatically
+1. Open cliMeter — it appears in your menu bar.
+2. Install the Claude usage exporter:
 
-That's it. No API keys to paste, no config files to edit.
+   ```bash
+   mkdir -p "$HOME/Library/Application Support/Climeter"
+   curl -fsSL \
+     https://raw.githubusercontent.com/bezlant/cliMeter/v1.0.26/scripts/claude-usage-export.sh \
+     -o "$HOME/Library/Application Support/Climeter/claude-usage-export.sh"
+   chmod 700 "$HOME/Library/Application Support/Climeter/claude-usage-export.sh"
+   ```
+
+3. In your Claude Code status-line script, capture stdin once and pass the same
+   JSON to the exporter:
+
+   ```bash
+   input=$(cat)
+   printf '%s' "$input" |
+     "$HOME/Library/Application Support/Climeter/claude-usage-export.sh" \
+     >/dev/null 2>&1
+   ```
+
+   Keep your existing visible status-line output after this hook. Claude Code
+   runs it after responses; cliMeter updates within a few seconds. If you do not
+   have a status line yet, create a shell script with the snippet above and set
+   it as Claude Code's `statusLine.command`.
+
+4. For Codex usage, run `codex login`.
+
+No Claude OAuth credential is read in the default mode. Settings includes an
+explicit Keychain compatibility mode for legacy multi-account behavior.
 
 ## Security
 
-- Claude credentials are read from Claude Code's macOS Keychain item
-- Claude Code-synced tokens are kept in memory only; cliMeter stores non-secret account metadata locally
+- Claude usage defaults to an owner-only sanitized file containing only rate-limit percentages and reset times
+- Claude OAuth credentials are not read unless Keychain compatibility mode is explicitly selected
+- Compatibility-mode tokens are kept in memory only; cliMeter stores non-secret account metadata locally
 - Codex credentials are read from the Codex CLI auth file managed by `codex login`
 - cliMeter never refreshes or writes Claude Code's shared OAuth token
 - No data leaves your machine except provider API calls to Anthropic and OpenAI/ChatGPT usage endpoints
@@ -77,7 +103,14 @@ That's it. No API keys to paste, no config files to edit.
 
 ## How it works
 
-cliMeter reads the OAuth credentials that Claude Code stores in the system Keychain for Claude usage. It uses the short-lived access token and re-reads the Keychain when needed; it does not refresh or overwrite Claude Code's token. For Codex usage, it reads the current Codex CLI OAuth login from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`. It polls provider usage endpoints every 3 minutes and displays the result.
+Claude Code sends its status-line JSON to a small local exporter. The exporter
+allowlists only the two rate-limit windows, merges concurrent sessions under a
+file lock, and atomically writes an owner-only snapshot for cliMeter. No Claude
+OAuth credential is needed. Keychain compatibility mode retains the previous
+read-only credential behavior when explicitly selected.
+
+For Codex usage, cliMeter reads the current Codex CLI OAuth login from
+`$CODEX_HOME/auth.json` or `~/.codex/auth.json` and polls the usage endpoint.
 
 You can toggle each provider on or off in Settings.
 

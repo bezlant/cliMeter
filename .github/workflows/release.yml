@@ -111,6 +111,7 @@ jobs:
             homepage "https://github.com/bezlant/cliMeter"
 
             depends_on macos: :sonoma
+            depends_on formula: "jq"
 
             app "Climeter.app"
 
