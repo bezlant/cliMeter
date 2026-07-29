@@ -33,6 +33,7 @@
 		1A400001000000000000001 /* PeakHoursService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A400002000000000000002 /* PeakHoursService.swift */; };
 		1A300001000000000000001 /* FileCredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A300002000000000000002 /* FileCredentialStore.swift */; };
 		1A600003000000000000003 /* CLICredentialPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A600004000000000000004 /* CLICredentialPolicy.swift */; };
+		1A700001000000000000001 /* ClaudeStatusLineUsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A700002000000000000002 /* ClaudeStatusLineUsageStore.swift */; };
 		1A100001000000000000001 /* ClimeterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A100002000000000000002 /* ClimeterTests.swift */; };
 		1A10000D00000000000000D /* CodexCredentialTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A10000E00000000000000E /* CodexCredentialTests.swift */; };
 		1A10000F00000000000000F /* CodexUsageMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A100010000000000000010 /* CodexUsageMapperTests.swift */; };
@@ -45,6 +46,7 @@
 		1A500001000000000000001 /* CredentialExpiryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A500002000000000000002 /* CredentialExpiryTests.swift */; };
 		1A600001000000000000001 /* CLICredentialPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A600002000000000000002 /* CLICredentialPolicyTests.swift */; };
 		1A600005000000000000005 /* UsageRefreshCoordinatorReadOnlyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */; };
+		1A700003000000000000003 /* ClaudeStatusLineUsageStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A700004000000000000004 /* ClaudeStatusLineUsageStoreTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -86,6 +88,7 @@
 		1A400002000000000000002 /* PeakHoursService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeakHoursService.swift; sourceTree = "<group>"; };
 		1A300002000000000000002 /* FileCredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileCredentialStore.swift; sourceTree = "<group>"; };
 		1A600004000000000000004 /* CLICredentialPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLICredentialPolicy.swift; sourceTree = "<group>"; };
+		1A700002000000000000002 /* ClaudeStatusLineUsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeStatusLineUsageStore.swift; sourceTree = "<group>"; };
 		1A100002000000000000002 /* ClimeterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClimeterTests.swift; sourceTree = "<group>"; };
 		1A100004000000000000004 /* ClimeterTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ClimeterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A10000E00000000000000E /* CodexCredentialTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexCredentialTests.swift; sourceTree = "<group>"; };
@@ -99,6 +102,7 @@
 		1A500002000000000000002 /* CredentialExpiryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialExpiryTests.swift; sourceTree = "<group>"; };
 		1A600002000000000000002 /* CLICredentialPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLICredentialPolicyTests.swift; sourceTree = "<group>"; };
 		1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UsageRefreshCoordinatorReadOnlyTests.swift; sourceTree = "<group>"; };
+		1A700004000000000000004 /* ClaudeStatusLineUsageStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeStatusLineUsageStoreTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -139,6 +143,7 @@
 				1A400002000000000000002 /* PeakHoursService.swift */,
 				1A300002000000000000002 /* FileCredentialStore.swift */,
 				1A600004000000000000004 /* CLICredentialPolicy.swift */,
+				1A700002000000000000002 /* ClaudeStatusLineUsageStore.swift */,
 				1A000024000000000000024 /* ClaudeCodeSyncService.swift */,
 				1A000030000000000000030 /* ClaudeAPIService.swift */,
 				1A200002000000000000002 /* CodexCredential.swift */,
@@ -186,6 +191,7 @@
 				1A500002000000000000002 /* CredentialExpiryTests.swift */,
 				1A600002000000000000002 /* CLICredentialPolicyTests.swift */,
 				1A600006000000000000006 /* UsageRefreshCoordinatorReadOnlyTests.swift */,
+				1A700004000000000000004 /* ClaudeStatusLineUsageStoreTests.swift */,
 			);
 			path = ClimeterTests;
 			sourceTree = "<group>";
@@ -306,6 +312,7 @@
 				1A400001000000000000001 /* PeakHoursService.swift in Sources */,
 				1A300001000000000000001 /* FileCredentialStore.swift in Sources */,
 				1A600003000000000000003 /* CLICredentialPolicy.swift in Sources */,
+				1A700001000000000000001 /* ClaudeStatusLineUsageStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -325,6 +332,7 @@
 				1A500001000000000000001 /* CredentialExpiryTests.swift in Sources */,
 				1A600001000000000000001 /* CLICredentialPolicyTests.swift in Sources */,
 				1A600005000000000000005 /* UsageRefreshCoordinatorReadOnlyTests.swift in Sources */,
+				1A700003000000000000003 /* ClaudeStatusLineUsageStoreTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
