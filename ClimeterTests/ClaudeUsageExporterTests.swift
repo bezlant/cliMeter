@@ -35,24 +35,91 @@ final class ClaudeUsageExporterTests: XCTestCase {
         let object = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: usageFile)) as? [String: Any]
         )
-        XCTAssertEqual(Set(object.keys), ["schema_version", "updated_at", "rate_limits"])
+        try assertExactCompleteSchema(object)
         let contents = try XCTUnwrap(
             String(data: Data(contentsOf: usageFile), encoding: .utf8)
         )
         XCTAssertFalse(contents.contains("do-not-copy"))
         XCTAssertEqual(try permissions(of: directory), 0o700)
         XCTAssertEqual(try permissions(of: usageFile), 0o600)
+        XCTAssertEqual(
+            try permissions(of: directory.appendingPathComponent("claude-usage.lock")),
+            0o600
+        )
+    }
+
+    func test_exporterSanitizesTaintedExistingAggregateAndInvalidTimestamp() throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let taintedAggregate = #"""
+        {
+          "schema_version":1,
+          "updated_at":"not-a-timestamp",
+          "rate_limits":{
+            "five_hour":{"used_percentage":20,"resets_at":1785300000},
+            "seven_day":{
+              "used_percentage":40,
+              "resets_at":1785800000,
+              "oauth_token":"old-secret"
+            }
+          },
+          "session_id":"old-session-secret"
+        }
+        """#
+        try Data(taintedAggregate.utf8).write(to: usageFile)
+
+        try runExporter(input: fiveHourOnlyFixture, directory: directory)
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: usageFile)) as? [String: Any]
+        )
+        try assertExactCompleteSchema(object)
+        let contents = try XCTUnwrap(
+            String(data: Data(contentsOf: usageFile), encoding: .utf8)
+        )
+        XCTAssertFalse(contents.contains("old-secret"))
+        XCTAssertFalse(contents.contains("old-session-secret"))
     }
 
     func test_exporterSerializesConcurrentWritersAndRejectsOlderWindow() throws {
         try runExporter(input: newerFixture, directory: directory)
         try runConcurrently([olderFixture, newestFixture], directory: directory)
-        try runExporter(input: newestFixture, directory: directory)
 
         let result = try decodedUsageFile()
 
         XCTAssertEqual(result.fiveHour.usedPercentage, 55)
         XCTAssertEqual(result.fiveHour.resetsAt, 1_785_400_000)
+        XCTAssertTrue(try temporaryExporterFiles(in: directory).isEmpty)
+    }
+
+    func test_exporterSerializesBlockedConcurrentPartialWritersWithoutLostUpdate() throws {
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+        let lockHolder = try holdExporterLock()
+        defer {
+            if lockHolder.isRunning {
+                lockHolder.terminate()
+                lockHolder.waitUntilExit()
+            }
+        }
+        let processes = [fiveHourOnlyFixture, sevenDayOnlyFixture]
+            .map { makeExporter(input: $0, directory: directory).0 }
+        try processes.forEach { try $0.run() }
+
+        XCTAssertTrue(try waitForExporterCandidates(count: 2, timeout: 0.75))
+        lockHolder.terminate()
+        lockHolder.waitUntilExit()
+        processes.forEach { $0.waitUntilExit() }
+
+        XCTAssertTrue(processes.allSatisfy { $0.terminationStatus == 0 })
+        XCTAssertEqual(
+            try decodedUsageFile().rateLimits.keys.sorted(),
+            ["five_hour", "seven_day"]
+        )
         XCTAssertTrue(try temporaryExporterFiles(in: directory).isEmpty)
     }
 
@@ -218,6 +285,42 @@ final class ClaudeUsageExporterTests: XCTestCase {
             $0.lastPathComponent.contains(".tmp.") ||
                 $0.lastPathComponent.contains(".candidate.") ||
                 $0.lastPathComponent.contains(".old.")
+        }
+    }
+
+    private func waitForExporterCandidates(
+        count: Int,
+        timeout: TimeInterval
+    ) throws -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let candidates = try FileManager.default.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: [.fileSizeKey]
+            ).filter {
+                $0.lastPathComponent.contains(".candidate.")
+            }
+            if candidates.count == count,
+               try candidates.allSatisfy({
+                   try $0.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0 > 0
+               }) {
+                return true
+            }
+            usleep(10_000)
+        } while Date() < deadline
+        return false
+    }
+
+    private func assertExactCompleteSchema(_ object: [String: Any]) throws {
+        XCTAssertEqual(Set(object.keys), ["schema_version", "updated_at", "rate_limits"])
+        XCTAssertEqual(object["schema_version"] as? Int, 1)
+        XCTAssertNotNil(object["updated_at"] as? NSNumber)
+
+        let rateLimits = try XCTUnwrap(object["rate_limits"] as? [String: Any])
+        XCTAssertEqual(Set(rateLimits.keys), ["five_hour", "seven_day"])
+        for key in ["five_hour", "seven_day"] {
+            let window = try XCTUnwrap(rateLimits[key] as? [String: Any])
+            XCTAssertEqual(Set(window.keys), ["used_percentage", "resets_at"])
         }
     }
 

@@ -21,7 +21,24 @@ publish_locked() {
     jq -n --argjson now "$now" \
       --slurpfile incoming "$candidate_file" \
       --slurpfile existing "$old_file" '
-        def merge_window($old; $new):
+        def sanitize_window($window):
+          if ($window | type) != "object" then null
+          elif ($window.used_percentage | type) != "number" then null
+          elif $window.used_percentage < 0 or $window.used_percentage > 100 then null
+          elif (
+            ($window | has("resets_at")) and
+            $window.resets_at != null and
+            ($window.resets_at | type) != "number"
+          ) then null
+          else {
+            used_percentage: $window.used_percentage,
+            resets_at: ($window.resets_at // null)
+          }
+          end;
+
+        def merge_window($old_window; $new_window):
+          (sanitize_window($old_window)) as $old |
+          (sanitize_window($new_window)) as $new |
           if $new == null then $old
           elif $old == null then $new
           elif (($old.resets_at // null) != null and
@@ -39,9 +56,20 @@ publish_locked() {
           }
           end;
 
-        ($existing[0]) as $old |
+        ($existing[0]) as $raw_old |
         ($incoming[0]) as $new |
-        ($old.rate_limits // {}) as $old_rates |
+        {
+          five_hour: sanitize_window($raw_old.rate_limits.five_hour),
+          seven_day: sanitize_window($raw_old.rate_limits.seven_day)
+        } |
+        with_entries(select(.value != null)) as $old_rates |
+        (
+          if ($raw_old.updated_at | type) == "number" and
+             ($raw_old.updated_at | isfinite)
+          then $raw_old.updated_at
+          else $now
+          end
+        ) as $old_updated_at |
         {
           five_hour: merge_window(
             ($old_rates.five_hour // null);
@@ -56,7 +84,7 @@ publish_locked() {
         {
           schema_version: 1,
           updated_at: (
-            if $merged == $old_rates then ($old.updated_at // $now)
+            if $merged == $old_rates then $old_updated_at
             else $now
             end
           ),
