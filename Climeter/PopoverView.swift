@@ -258,6 +258,74 @@ enum ClaudeStalePresentation {
     }
 }
 
+struct ClaudeProfileCardPresentation {
+    enum Row: Equatable {
+        case usage
+        case error(String)
+        case loading
+        case waiting(String)
+    }
+
+    let staleAge: TimeInterval?
+    let rows: [Row]
+
+    static func make(
+        usageSource: ClaudeUsageSource,
+        credentialSource: CredentialSource,
+        hasUsageData: Bool,
+        errorMessage: String?,
+        lastSuccessAt: Date?,
+        isStale: Bool,
+        currentTime: Date
+    ) -> ClaudeProfileCardPresentation {
+        let waitingMessage = ClaudeStalePresentation.waitingMessage(
+            usageSource: usageSource,
+            credentialSource: credentialSource,
+            isStale: isStale,
+            lastSuccessAt: lastSuccessAt,
+            currentTime: currentTime,
+            errorMessage: errorMessage
+        )
+        let visibleError = errorMessage.flatMap { message in
+            hasUsageData && usageSource != .statusLineFile ? nil : message
+        }
+
+        if usageSource == .statusLineFile,
+           let visibleError,
+           isFileValidationError(visibleError) {
+            return ClaudeProfileCardPresentation(
+                staleAge: nil,
+                rows: hasUsageData ? [.usage, .error(visibleError)] : [.error(visibleError)]
+            )
+        }
+
+        var rows: [Row] = []
+        if hasUsageData {
+            rows.append(.usage)
+        } else if visibleError == nil, waitingMessage == nil {
+            rows.append(.loading)
+        }
+        if let visibleError {
+            rows.append(.error(visibleError))
+        }
+        if let waitingMessage {
+            rows.append(.waiting(waitingMessage))
+        }
+
+        let staleAge = hasUsageData
+            ? lastSuccessAt
+                .map { currentTime.timeIntervalSince($0) }
+                .flatMap { $0 > ClaudeStalePresentation.staleThreshold ? $0 : nil }
+            : nil
+        return ClaudeProfileCardPresentation(staleAge: staleAge, rows: rows)
+    }
+
+    private static func isFileValidationError(_ message: String) -> Bool {
+        message == "Climeter usage exporter needs an update."
+            || message == "Claude usage file is invalid."
+    }
+}
+
 struct ProfileCard: View {
     let profile: Profile
     let usageSource: ClaudeUsageSource
@@ -269,20 +337,15 @@ struct ProfileCard: View {
     let showProfileName: Bool
     let currentTime: Date
 
-    private var staleAge: TimeInterval? {
-        guard usageData != nil, let last = lastSuccessAt else { return nil }
-        let age = currentTime.timeIntervalSince(last)
-        return age > ClaudeStalePresentation.staleThreshold ? age : nil
-    }
-
-    private var staleWaitingText: String? {
-        ClaudeStalePresentation.waitingMessage(
+    private var presentation: ClaudeProfileCardPresentation {
+        ClaudeProfileCardPresentation.make(
             usageSource: usageSource,
             credentialSource: profile.credentialSource,
-            isStale: isStale,
+            hasUsageData: usageData != nil,
+            errorMessage: errorMessage,
             lastSuccessAt: lastSuccessAt,
-            currentTime: currentTime,
-            errorMessage: errorMessage
+            isStale: isStale,
+            currentTime: currentTime
         )
     }
 
@@ -295,6 +358,54 @@ struct ProfileCard: View {
             .font(.system(size: 9))
             .monospacedDigit()
             .foregroundColor(.secondary.opacity(0.7))
+    }
+
+    @ViewBuilder
+    private func presentationRow(_ row: ClaudeProfileCardPresentation.Row) -> some View {
+        switch row {
+        case .usage:
+            if let usageData {
+                UsageRow(
+                    label: "Session",
+                    window: usageData.fiveHour,
+                    currentTime: currentTime
+                )
+                UsageRow(
+                    label: "Week",
+                    window: usageData.sevenDay,
+                    currentTime: currentTime
+                )
+            }
+        case .error(let message):
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange)
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        case .loading:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading...")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+        case .waiting(let message):
+            Text(message)
+                .font(.system(size: 10))
+                .monospacedDigit()
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.9)
+                .allowsTightening(true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("claude-stale-status")
+        }
     }
 
     var body: some View {
@@ -315,55 +426,13 @@ struct ProfileCard: View {
 
                 Spacer()
 
-                if let age = staleAge {
+                if let age = presentation.staleAge {
                     staleLabel(age)
                 }
             }
 
-            if let data = usageData {
-                UsageRow(
-                    label: "Session",
-                    window: data.fiveHour,
-                    currentTime: currentTime
-                )
-                UsageRow(
-                    label: "Week",
-                    window: data.sevenDay,
-                    currentTime: currentTime
-                )
-            } else if errorMessage == nil, staleWaitingText == nil {
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Loading...")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            if let errorMessage, usageData == nil || usageSource == .statusLineFile {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.orange)
-                    Text(errorMessage)
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if let staleWaitingText {
-                Text(staleWaitingText)
-                    .font(.system(size: 10))
-                    .monospacedDigit()
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.9)
-                    .allowsTightening(true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("claude-stale-status")
+            ForEach(presentation.rows.indices, id: \.self) { index in
+                presentationRow(presentation.rows[index])
             }
         }
     }

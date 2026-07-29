@@ -8,7 +8,9 @@ commit `580be284e4b6407d869a289039df5cdcb70bedcc`.
 Settings now exposes the password-free status-line source as the default-facing
 choice and identifies manual Keychain access as compatibility mode. The popover
 and menu-bar stale treatment use the selected source, and file validation
-errors remain visible alongside the last good usage snapshot.
+errors remain visible alongside the last good usage snapshot. When a retained
+snapshot is old, the validation error takes precedence over generic stale and
+Claude Code waiting treatments.
 
 ## Hypothesis and evidence
 
@@ -35,6 +37,10 @@ lifecycle or profile attribution.
 - Manual-Keychain rate-limit behavior was treated as a counterexample during
   self-review. The new "error plus usage" row is limited to status-line mode so
   compatibility mode keeps its prior presentation.
+- Review then exposed a conflict within the status-line card: header stale age,
+  footer waiting text, and validation error were derived independently. A stale
+  retained snapshot therefore satisfied all three branches and displayed
+  contradictory remediation.
 
 The evidence supported implementing at the existing presentation seam; no
 provider, credential, or persistence change was needed.
@@ -84,6 +90,28 @@ rendered-card test uses Vision OCR against the real SwiftUI card and verifies
 that Session, Week, and every error-message token are present for both
 validation errors.
 
+### Review-fix RED/GREEN
+
+The retained-data rendering test was changed first to use an export timestamp
+601 seconds old with `isStale == true` for both validation messages. The focused
+suite then failed four assertions: both fixtures rendered both forbidden
+“waiting” and “stale” wording.
+
+An ordered presentation contract was added next. Before production code, the
+focused build failed to compile because `ClaudeProfileCardPresentation` did not
+exist. The desired state was explicit:
+
+```swift
+staleAge == nil
+rows == [.usage, .error(exactValidationMessage)]
+```
+
+After extracting that presentation model and rendering the card from its
+ordered rows, the focused suite passed 11/11. The deterministic model test
+proves ordering and exclusivity for both validation messages; the Vision OCR
+integration test proves the real card retains Session, Week, and the exact
+error while omitting generic “waiting” and “stale” text.
+
 ## Implementation
 
 ### Settings
@@ -105,8 +133,11 @@ validation errors.
   regardless of profile credential provenance.
 - Manual Keychain `.selfOwned` profiles preserve their existing non-waiting
   behavior.
-- Status-line validation messages render beneath retained usage rows; the
-  existing no-data error layout remains intact.
+- `ClaudeProfileCardPresentation` derives header stale age and ordered body rows
+  together. Status-line validation messages produce `[usage, error]`, so they
+  render beneath retained usage while suppressing stale/waiting treatments.
+- The existing no-data error, loading, ordinary waiting, and manual-Keychain
+  rate-limit layouts remain represented by the same ordered model.
 - Applied monospaced digits to the dynamic stale age/status text touched by the
   change, avoiding width jitter without adding animation or redesign.
 
@@ -119,6 +150,7 @@ validation errors.
 | Auto-switch remained editable even though status-line data cannot attribute accounts. | Auto-switch and its threshold are disabled in file mode with “Requires Keychain compatibility mode.” |
 | Stale presentation depended only on profile credential provenance. | File mode always uses ten-minute Claude Code waiting semantics; manual `.selfOwned` behavior is unchanged. |
 | A last-good snapshot hid future-schema or malformed-file errors. | Session and Week remain visible and the validation message appears below them. |
+| A stale retained snapshot showed the validation error plus header “stale” and footer “waiting for Claude Code.” | The exact validation error is the sole status/remediation message; Session and Week remain above it. |
 | Dynamic stale age text used proportional digits. | Touched stale age/status text uses monospaced digits for stable width. |
 
 ## Verification
@@ -132,7 +164,7 @@ xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
   CODE_SIGNING_ALLOWED=NO
 ```
 
-Result: 10/10 passed, zero failures, skips, or expected failures.
+Result: 11/11 passed, zero failures, skips, or expected failures.
 
 ### Full suite
 
@@ -141,7 +173,7 @@ xcodebuild test -project Climeter.xcodeproj -scheme Climeter \
   -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
 ```
 
-Result: 103/103 passed, zero failures, skips, or expected failures.
+Result: 104/104 passed, zero failures, skips, or expected failures.
 
 The counts were confirmed with `xcresulttool get test-results summary`.
 
@@ -180,6 +212,9 @@ The counts were confirmed with `xcresulttool get test-results summary`.
   directly protects the requested retained-data error placement.
 - The error-plus-usage presentation is deliberately source-scoped instead of
   applying to manual Keychain profiles, preserving compatibility behavior.
+- Validation precedence intentionally matches the two exact messages published
+  by `ClaudeStatusLineUsageStore`; other status-line errors retain their prior
+  waiting behavior.
 - Settings picker wording and disabled modifiers were compiled and statically
   inspected; there is no UI automation dependency in this project to exercise
   picker interaction end to end.

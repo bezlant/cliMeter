@@ -215,6 +215,29 @@ final class ClimeterTests: XCTestCase {
         )
     }
 
+    func test_profileCardPresentationPrioritizesValidationErrorOverStaleStatus() {
+        let now = Date(timeIntervalSince1970: 20_000)
+        let errors = [
+            "Climeter usage exporter needs an update.",
+            "Claude usage file is invalid."
+        ]
+
+        for error in errors {
+            let presentation = ClaudeProfileCardPresentation.make(
+                usageSource: .statusLineFile,
+                credentialSource: .selfOwned,
+                hasUsageData: true,
+                errorMessage: error,
+                lastSuccessAt: now.addingTimeInterval(-601),
+                isStale: true,
+                currentTime: now
+            )
+
+            XCTAssertNil(presentation.staleAge)
+            XCTAssertEqual(presentation.rows, [.usage, .error(error)])
+        }
+    }
+
     @MainActor
     func test_profileCardRendersOneLineStaleStatusWithoutRetryControl() throws {
         let now = Date(timeIntervalSince1970: 20_000)
@@ -320,8 +343,8 @@ final class ClimeterTests: XCTestCase {
                     sevenDay: UsageWindow(utilization: 80, resetsAt: now.addingTimeInterval(48 * 3_600))
                 ),
                 errorMessage: error,
-                lastSuccessAt: now,
-                isStale: false,
+                lastSuccessAt: now.addingTimeInterval(-601),
+                isStale: true,
                 isCLIActive: false,
                 showProfileName: false,
                 currentTime: now
@@ -331,6 +354,7 @@ final class ClimeterTests: XCTestCase {
 
             let recognizedStrings = try recognizedText(in: renderedImage(from: card)).map(\.string)
             let recognized = recognizedStrings.flatMap(recognizedTokens)
+            let normalized = recognized.map { $0.lowercased() }
 
             XCTAssertTrue(recognized.contains("Session"), "Rendered card text: \(recognizedStrings)")
             XCTAssertTrue(recognized.contains("Week"), "Rendered card text: \(recognizedStrings)")
@@ -340,6 +364,14 @@ final class ClimeterTests: XCTestCase {
                     "Missing \(token) in rendered card text: \(recognizedStrings)"
                 )
             }
+            XCTAssertFalse(
+                normalized.contains("waiting"),
+                "Rendered card text: \(recognizedStrings)"
+            )
+            XCTAssertFalse(
+                normalized.contains("stale"),
+                "Rendered card text: \(recognizedStrings)"
+            )
         }
     }
 
