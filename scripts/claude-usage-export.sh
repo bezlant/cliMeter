@@ -43,14 +43,11 @@ publish_locked() {
           elif (($old.resets_at // null) != null and
                 ($new.resets_at // null) != null) then
             if $new.resets_at < $old.resets_at then $old
-            elif $new.resets_at > $old.resets_at then $new
-            else {
-              used_percentage: ([$old.used_percentage, $new.used_percentage] | max),
-              resets_at: $old.resets_at
-            }
+            # Manual usage resets can lower usage without changing resets_at.
+            else $new
             end
           else {
-            used_percentage: ([$old.used_percentage, $new.used_percentage] | max),
+            used_percentage: $new.used_percentage,
             resets_at: ($old.resets_at // $new.resets_at // null)
           }
           end;

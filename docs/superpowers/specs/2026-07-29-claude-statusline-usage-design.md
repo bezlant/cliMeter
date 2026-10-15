@@ -105,9 +105,9 @@ output does not depend on the export succeeding. Inside the lock, the exporter:
 2. Merges independently present windows with the existing valid aggregate,
    publishing a valid partial file until both windows have been observed.
 3. Rejects a candidate window whose non-null `resets_at` is older than the
-   stored window; for equal reset times, keeps the higher percentage.
-   When either reset time is unknown, it retains a known stored reset and uses
-   the higher percentage.
+   stored window; otherwise uses the incoming percentage, including decreases
+   after manual usage resets. When either reset time is unknown, it retains a
+   known stored reset and uses the incoming percentage.
 4. Preserves `updated_at` when the merged `rate_limits` object is semantically
    unchanged and stamps the current time only when at least one rate-limit
    value changes.
@@ -118,10 +118,11 @@ output does not depend on the export succeeding. Inside the lock, the exporter:
 
 The lock serializes concurrent Claude Code sessions; atomic rename protects
 Climeter readers. A delayed render from a session with older reset data cannot
-replace a newer window. If reset times are equal, usage is treated as monotonic
-within that window. This may temporarily preserve a slightly high percentage if
-Claude later reconciles usage downward, but it prevents an idle session from
-making usage regress and appear fresh.
+replace a newer window. Equal reset times do not imply monotonic usage: a manual
+reset was observed to reduce weekly usage from 100% to 16% without changing
+`resets_at`. The incoming percentage takes precedence so that a reset cannot
+leave the meter pinned at 100%. A cached render with the same reset time may
+temporarily replace a more recent reading until the next response updates it.
 
 Status-line commands also run for UI-only changes such as permission or Vim mode.
 Those renders carry the prior `rate_limits`; preserving `updated_at` prevents

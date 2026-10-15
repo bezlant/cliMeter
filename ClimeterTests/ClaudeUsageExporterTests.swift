@@ -133,6 +133,23 @@ final class ClaudeUsageExporterTests: XCTestCase {
         XCTAssertEqual(second.updatedAt, first.updatedAt)
     }
 
+    func test_exporterAcceptsManualUsageResetWithUnchangedResetTime() throws {
+        try runExporter(
+            input: #"{"rate_limits":{"five_hour":{"used_percentage":2,"resets_at":1792066200},"seven_day":{"used_percentage":100,"resets_at":1792080000}}}"#,
+            directory: directory
+        )
+
+        try runExporter(
+            input: #"{"rate_limits":{"five_hour":{"used_percentage":2,"resets_at":1792066200},"seven_day":{"used_percentage":16,"resets_at":1792080000}}}"#,
+            directory: directory
+        )
+
+        let result = try decodedUsageFile()
+        XCTAssertEqual(result.rateLimits["seven_day"]?.usedPercentage, 16)
+        XCTAssertEqual(result.rateLimits["seven_day"]?.resetsAt, 1_792_080_000)
+        XCTAssertEqual(result.fiveHour.usedPercentage, 2)
+    }
+
     func test_exporterMergesIndependentlyPresentWindows() throws {
         try runExporter(input: fiveHourOnlyFixture, directory: directory)
         try runExporter(input: sevenDayOnlyFixture, directory: directory)

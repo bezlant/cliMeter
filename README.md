@@ -65,7 +65,7 @@ New versions are published automatically — the Homebrew cask updates on every 
    ```bash
    mkdir -p "$HOME/Library/Application Support/Climeter"
    curl -fsSL \
-     https://raw.githubusercontent.com/bezlant/cliMeter/v1.0.26/scripts/claude-usage-export.sh \
+     https://raw.githubusercontent.com/bezlant/cliMeter/v1.0.27/scripts/claude-usage-export.sh \
      -o "$HOME/Library/Application Support/Climeter/claude-usage-export.sh"
    chmod 700 "$HOME/Library/Application Support/Climeter/claude-usage-export.sh"
    ```
